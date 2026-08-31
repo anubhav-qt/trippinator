@@ -1,0 +1,12 @@
+[package]
+name = "trippinator-capture-screen"
+version.workspace = true
+edition.workspace = true
+description = "Desktop screen capture via Windows Desktop Duplication and GDI API"
+
+[dependencies]
+windows.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true

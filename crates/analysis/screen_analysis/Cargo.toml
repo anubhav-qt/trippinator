@@ -1,0 +1,11 @@
+[package]
+name = "trippinator-analysis-screen"
+version.workspace = true
+edition.workspace = true
+description = "Screen analysis — spatial color, motion, edges, focus weighting"
+
+[dependencies]
+trippinator-capture-screen = { path = "../../capture/screen" }
+glam.workspace = true
+log.workspace = true
+anyhow.workspace = true

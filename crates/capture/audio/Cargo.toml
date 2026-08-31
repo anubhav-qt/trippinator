@@ -1,0 +1,13 @@
+[package]
+name = "trippinator-capture-audio"
+version.workspace = true
+edition.workspace = true
+description = "System audio loopback capture via WASAPI"
+
+[dependencies]
+cpal.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true

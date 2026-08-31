@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/capture/screen",
+    "crates/capture/audio",
+    "crates/analysis/screen_analysis",
+    "crates/analysis/audio_analysis",
+    "crates/analysis/temporal",
+    "crates/dynamics/state",
+    "crates/dynamics/graph",
+    "crates/dynamics/coupling",
+    "crates/renderer/gpu",
+    "crates/renderer/pipelines",
+    "crates/renderer/resources",
+    "crates/renderer/compositor",
+    "crates/systems/waves",
+    "crates/systems/particles",
+    "crates/systems/fields",
+    "crates/systems/fractals",
+    "crates/systems/reaction_diffusion",
+    "crates/systems/feedback",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Anubhav"]
+license = "MIT"
+description = "A real-time generative audiovisual organism that perceives your desktop and evolves on a secondary display"
+
+[workspace.dependencies]
+# GPU
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+naga = "24"
+
+# Windowing
+winit = "0.30"
+raw-window-handle = "0.6"
+
+# Audio
+cpal = "0.15"
+rustfft = "6"
+
+# Screen capture (Windows)
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+] }
+
+# Math
+glam = { version = "0.29", features = ["bytemuck"] }
+nalgebra = "0.33"
+
+# Utilities
+pollster = "0.4"
+env_logger = "0.11"
+log = "0.4"
+anyhow = "1"
+thiserror = "2"
+rand = "0.9"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

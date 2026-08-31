@@ -1,0 +1,15 @@
+[package]
+name = "trippinator-systems-waves"
+version.workspace = true
+edition.workspace = true
+description = "Oscillatory systems — sine, harmonics, standing waves, interference, coupled oscillators"
+
+[dependencies]
+trippinator-dynamics-state = { path = "../../dynamics/state" }
+trippinator-analysis-audio = { path = "../../analysis/audio_analysis" }
+trippinator-renderer-gpu = { path = "../../renderer/gpu" }
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true
+anyhow.workspace = true

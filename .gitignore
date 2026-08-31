@@ -1,0 +1,17 @@
+/target
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,10 @@
+[package]
+name = "trippinator-renderer-resources"
+version.workspace = true
+edition.workspace = true
+description = "GPU resource management — textures, buffers, bind groups"
+
+[dependencies]
+trippinator-renderer-gpu = { path = "../gpu" }
+wgpu.workspace = true
+log.workspace = true

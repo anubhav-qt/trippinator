@@ -1,0 +1,12 @@
+[package]
+name = "trippinator-systems-reaction-diffusion"
+version.workspace = true
+edition.workspace = true
+description = "Reaction-diffusion systems — Gray-Scott and related models on GPU"
+
+[dependencies]
+trippinator-dynamics-state = { path = "../../dynamics/state" }
+trippinator-renderer-gpu = { path = "../../renderer/gpu" }
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true

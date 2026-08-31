@@ -1,0 +1,11 @@
+[package]
+name = "trippinator-analysis-audio"
+version.workspace = true
+edition.workspace = true
+description = "Audio DSP — FFT, band energies, spectral features across three timescales"
+
+[dependencies]
+trippinator-capture-audio = { path = "../../capture/audio" }
+rustfft.workspace = true
+log.workspace = true
+anyhow.workspace = true

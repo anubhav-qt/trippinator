@@ -1,0 +1,13 @@
+[package]
+name = "trippinator-systems-fields"
+version.workspace = true
+edition.workspace = true
+description = "Field systems — vector fields, curl, vortex, turbulence"
+
+[dependencies]
+trippinator-dynamics-state = { path = "../../dynamics/state" }
+trippinator-renderer-gpu = { path = "../../renderer/gpu" }
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "trippinator-systems-particles"
+version.workspace = true
+edition.workspace = true
+description = "Particle systems — GPU-driven particle simulation and rendering"
+
+[dependencies]
+trippinator-dynamics-state = { path = "../../dynamics/state" }
+trippinator-renderer-gpu = { path = "../../renderer/gpu" }
+wgpu.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true

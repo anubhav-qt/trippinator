@@ -1,0 +1,11 @@
+[package]
+name = "trippinator-renderer-gpu"
+version.workspace = true
+edition.workspace = true
+description = "GPU abstraction — device, buffers, texture management, shader compilation"
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+anyhow.workspace = true

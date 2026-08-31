@@ -1,0 +1,11 @@
+[package]
+name = "trippinator-renderer-pipelines"
+version.workspace = true
+edition.workspace = true
+description = "Render pipelines — shader compilation and pipeline state management"
+
+[dependencies]
+trippinator-renderer-gpu = { path = "../gpu" }
+wgpu.workspace = true
+log.workspace = true
+anyhow.workspace = true

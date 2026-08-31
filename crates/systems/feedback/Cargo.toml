@@ -1,0 +1,12 @@
+[package]
+name = "trippinator-systems-feedback"
+version.workspace = true
+edition.workspace = true
+description = "Temporal feedback — frame memory, warp, decay, accumulation"
+
+[dependencies]
+trippinator-dynamics-state = { path = "../../dynamics/state" }
+trippinator-renderer-gpu = { path = "../../renderer/gpu" }
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true

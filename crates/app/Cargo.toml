@@ -1,0 +1,38 @@
+[package]
+name = "trippinator-app"
+version.workspace = true
+edition.workspace = true
+description = "Main application binary — window management, event loop, and subsystem orchestration"
+
+[[bin]]
+name = "trippinator"
+path = "src/main.rs"
+
+[dependencies]
+trippinator-capture-screen = { path = "../capture/screen" }
+trippinator-capture-audio = { path = "../capture/audio" }
+trippinator-analysis-screen = { path = "../analysis/screen_analysis" }
+trippinator-analysis-audio = { path = "../analysis/audio_analysis" }
+trippinator-analysis-temporal = { path = "../analysis/temporal" }
+trippinator-dynamics-state = { path = "../dynamics/state" }
+trippinator-dynamics-graph = { path = "../dynamics/graph" }
+trippinator-dynamics-coupling = { path = "../dynamics/coupling" }
+trippinator-renderer-gpu = { path = "../renderer/gpu" }
+trippinator-renderer-pipelines = { path = "../renderer/pipelines" }
+trippinator-renderer-resources = { path = "../renderer/resources" }
+trippinator-renderer-compositor = { path = "../renderer/compositor" }
+trippinator-systems-waves = { path = "../systems/waves" }
+trippinator-systems-particles = { path = "../systems/particles" }
+trippinator-systems-fields = { path = "../systems/fields" }
+trippinator-systems-fractals = { path = "../systems/fractals" }
+trippinator-systems-reaction-diffusion = { path = "../systems/reaction_diffusion" }
+trippinator-systems-feedback = { path = "../systems/feedback" }
+
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+env_logger.workspace = true
+log.workspace = true
+anyhow.workspace = true
+glam.workspace = true
+crossbeam-channel.workspace = true

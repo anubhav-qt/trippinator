@@ -1,0 +1,29 @@
+/// Configuration for trippinator.
+///
+/// Stored at `%APPDATA%\trippinator\config.toml`.
+/// On first run with no config, the app will auto-detect and write defaults.
+
+[display]
+# Which monitor to use. "secondary_portrait" = auto-detect portrait secondary.
+# Can also be "primary" or a monitor name string e.g. "DELL U2414H"
+target_monitor = "secondary_portrait"
+
+[audio]
+# Which audio output device to listen to.
+# "default" = system default output device
+# "auto" = first non-default device found
+# Or a partial name match, e.g. "Speakers", "Headphones", "NVIDIA"
+output_device = "default"
+
+[performance]
+# Target FPS. The adaptive complexity system will try to hit this.
+target_fps = 120
+# GPU power preference: "high" or "low"
+gpu_preference = "high"
+
+[capture]
+# Screen capture resolution (downscaled for analysis)
+screen_capture_width = 128
+screen_capture_height = 72
+# Capture interval in milliseconds (16 = ~60fps screen analysis)
+capture_interval_ms = 16
