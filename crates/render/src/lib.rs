@@ -16,7 +16,7 @@
 //! - spectral balance (bass/mid/treble weights) — continuous, always-on "genre" of look.
 
 use bytemuck::{Pod, Zeroable};
-use trippinator_analysis_audio::AudioFeatures;
+use trippinator_analysis_audio::{AudioFeatures, SongCharacter};
 use trippinator_renderer_gpu::{RenderTarget, UniformBuffer};
 use wgpu::{Device, Queue, TextureFormat};
 
@@ -84,7 +84,9 @@ struct Uniforms {
     /// A fixed per-frame value makes brightness depend on frame rate and drives the
     /// loop to `inject / (1 - decay)`, which saturates the tonemapper to white.
     feedback_decay: f32,
-    hue_shift: f32,
+    /// The song's hue, 0..1 around the colour circle. Derived from slow spectral
+    /// character and then held still — see `palette_target_hue`.
+    palette_hue: f32,
     /// 0..1 "this is a big moment" envelope, from energy vs. its own rolling baseline.
     grandness: f32,
 
@@ -95,9 +97,10 @@ struct Uniforms {
     /// fold, breathing mirror order, flow-field warp, ring rotation and shape morphing,
     /// orb churn, blob eccentricity. Arrives already mapped into `ORGANIC_MIN..MAX`.
     organic: f32,
-    /// Radius the central mandala occupies, as a fraction of the frame. Everything
-    /// outside it is background.
-    core_scale: f32,
+    /// Radius the central mandala occupies, in the shader's aspect-corrected units.
+    /// Everything outside it is background. Derived from `core_frac` and the frame's
+    /// short axis, so it means the same thing in portrait and landscape.
+    core_radius: f32,
 
     // --- Warp character. Every one is a RATE, in units per second, and the shader
     // multiplies by `dt`. The values these replaced were per-frame constants, which made
@@ -139,6 +142,18 @@ struct Uniforms {
     /// Extra always-outward radial rate applied to the background's sample coordinate
     /// only, so the outer field streams outward and fades instead of pulsing in place.
     bg_outflow: f32,
+    /// How far apart the three colour channels are warped, as a fraction of the sample
+    /// coordinate. Tiny per frame; the loop compounds it into iridescent fringing.
+    chroma: f32,
+
+    /// Distance around the hue circle from the song's primary hue to its secondary one.
+    /// Small is an analogous palette, ~0.5 is complementary.
+    palette_spread: f32,
+    palette_sat: f32,
+    /// Radius of the central orb, in the same units as `core_radius`. Computed here
+    /// rather than in the shader because the warp needs it too — the kaleidoscope has to
+    /// know where the orb ends so it can start outside it.
+    orb_radius: f32,
     _pad3: f32,
 }
 
@@ -171,6 +186,32 @@ fn song_feel(audio: &AudioFeatures, grandness: f32, bass_w: f32, mid_w: f32, tre
     let brightness = (mid_w * 0.5 + treble_w * 1.5 - bass_w * 0.3 + 0.25).clamp(0.0, 1.0);
 
     (churn * 0.40 + brightness * 0.35 + movement * 0.15 + grandness * 0.10).clamp(0.0, 1.0)
+}
+
+/// The song's own hue, 0..1 around the colour circle.
+///
+/// Deterministic in the music and nothing else. There is deliberately no entropy seed
+/// here, unlike the warp: the same song should *move* differently every run and be
+/// *coloured* the same every run. A colour that is randomized per run is not the song's
+/// colour, it is the run's.
+///
+/// Brightness is the primary axis because it is the one mapping between sound and colour
+/// that is not arbitrary — a dark, low-centroid mix reads as red and amber, a bright
+/// airy one as cyan and violet, and listeners agree about that far more than they agree
+/// about anything else in this space. The spectral tilt is a secondary term, there to
+/// separate songs that happen to share a centroid.
+fn palette_target_hue(c: &SongCharacter) -> f32 {
+    let bright = smoothstep(0.03, 0.30, c.brightness);
+    // 0.02 (deep red) through amber, green and cyan to 0.78 (violet).
+    let base = 0.02 + 0.76 * bright;
+    let tilt = (c.treble_w - c.bass_w) * 0.10;
+    (base + tilt).rem_euclid(1.0)
+}
+
+/// Signed shortest distance from `a` to `b` around a circle of circumference 1.
+fn circular_delta(a: f32, b: f32) -> f32 {
+    let d = (b - a).rem_euclid(1.0);
+    if d > 0.5 { d - 1.0 } else { d }
 }
 
 /// Same curve as WGSL/GLSL `smoothstep`.
@@ -561,7 +602,12 @@ pub struct Renderer {
     width: u32,
     height: u32,
     time: f32,
-    hue_shift: f32,
+    /// The song's hue, held still by a deadband until the material actually changes.
+    palette_hue: f32,
+    palette_spread: f32,
+    palette_sat: f32,
+    /// Live-tunable chromatic separation between the three channels' warps.
+    chroma: f32,
     /// Smoothed "big moment" envelope — fast to rise, slow to fall, so a peak sustains
     /// instead of flickering frame to frame.
     grandness_env: f32,
@@ -580,9 +626,11 @@ pub struct Renderer {
     /// Manual offset on that envelope, on the live keys, so the automatic mapping can
     /// still be nudged by hand against real music without fighting it.
     organic_bias: f32,
-    /// Radius of the central mandala — see `Uniforms::core_scale`. On live keys because
-    /// how big it *reads* depends on the panel, and this one is judged by eye.
-    core_scale: f32,
+    /// Radius of the central mandala as a fraction of the frame's SHORT axis. A
+    /// fraction rather than an absolute radius so it means the same thing on a portrait
+    /// panel and a landscape one — see `Uniforms::core_radius`. On live keys because how
+    /// big it *reads* depends on the panel, and this one is judged by eye.
+    core_frac: f32,
 
     /// Smoothed archetype weights. ~12 s to cross over, so a track that changes
     /// character mid-song moves between configurations over a phrase, not a bar.
@@ -671,7 +719,15 @@ impl Renderer {
             width,
             height,
             time: 0.0,
-            hue_shift: 0.0,
+            // Amber, so the first seconds before the slow character features have settled
+            // are a plausible colour rather than a lurch away from an arbitrary one.
+            palette_hue: 0.08,
+            palette_spread: 0.18,
+            palette_sat: 0.72,
+            // Tuned to be visible as fringing on moving edges without reading as a
+            // misconverged projector. The feedback loop multiplies this by the trail
+            // depth, so it wants to be far smaller than it looks like it should.
+            chroma: 0.0011,
             grandness_env: 0.0,
             // Tuned by ear against real music with all four layers running. Notably
             // ~2x higher than the value predicted from equilibrium alone: the layers
@@ -682,10 +738,11 @@ impl Renderer {
             // Starts mid-range and settles within a few seconds of audio.
             organic_env: 0.5,
             organic_bias: 0.0,
-            // The portrait panel is only +/-0.5625 wide in the shader's aspect-corrected
-            // space, so a core much above this reaches the side of the screen and leaves
-            // no background to see.
-            core_scale: 0.45,
+            // 0.8 of the short axis. This is the 0.45 that was tuned by eye on the
+            // portrait panel, re-expressed: that panel is +/-0.5625 wide in the shader's
+            // aspect-corrected space, and 0.45 / 0.5625 = 0.8. Above ~1.0 the mandala
+            // reaches the sides and leaves no background to see.
+            core_frac: 0.8,
             profile: SongProfile::default(),
             phases: SlowPhases::seeded(),
             rupture: RuptureDetector::new(),
@@ -719,6 +776,17 @@ impl Renderer {
         log::info!("inject_gain -> {:.2}", self.inject_gain);
     }
 
+    /// Scale the chromatic separation between the three channels' warps.
+    pub fn adjust_chroma(&mut self, factor: f32) {
+        self.chroma = (self.chroma * factor).clamp(0.0, 0.012);
+        log::info!("chroma -> {:.4}", self.chroma);
+    }
+
+    /// The song's current hue, 0..1, for logging/tuning.
+    pub fn palette_hue(&self) -> f32 {
+        self.palette_hue
+    }
+
     /// Scale trail length (seconds to half brightness).
     pub fn adjust_trail(&mut self, factor: f32) {
         self.feedback_half_life = (self.feedback_half_life * factor).clamp(0.05, 4.0);
@@ -745,13 +813,22 @@ impl Renderer {
 
     /// Grow or shrink the central mandala, leaving more or less room for the background.
     pub fn adjust_core_scale(&mut self, factor: f32) {
-        self.core_scale = (self.core_scale * factor).clamp(0.15, 1.0);
-        log::info!("core scale -> {:.2}", self.core_scale);
+        self.core_frac = (self.core_frac * factor).clamp(0.25, 1.60);
+        log::info!("core scale -> {:.2} of short axis", self.core_frac);
     }
 
-    /// Current mandala radius as a fraction of the frame, for logging/tuning.
+    /// Current mandala radius as a fraction of the frame's short axis, for logging.
     pub fn core_scale(&self) -> f32 {
-        self.core_scale
+        self.core_frac
+    }
+
+    /// Half-extent of the frame's short axis in the shader's aspect-corrected units:
+    /// 0.5625 on a 1080x1920 portrait panel, 1.0 on a 1920x1080 landscape one. The
+    /// shader normalizes height to 1 either way, which is exactly why an orientation
+    /// change is not a 90-degree rotation of the same picture — it changes which axis is
+    /// short *and* the scale of everything measured against it.
+    fn short_half(&self) -> f32 {
+        self.width.min(self.height) as f32 / self.height.max(1) as f32
     }
 
     /// Which configuration the visual is currently running, for logging/tuning. This is
@@ -789,9 +866,6 @@ impl Renderer {
         structural: StructuralState,
     ) {
         self.time += dt;
-        // Slow, always-drifting hue independent of any single track — see DESIGN.md
-        // "timescale hierarchy." ~90s per full rotation.
-        self.hue_shift = (self.hue_shift + dt / 90.0) % 1.0;
 
         let bands = &audio.bands.energy;
         let bass_raw = bands[0] + bands[1];
@@ -801,6 +875,8 @@ impl Renderer {
 
         let mut band_energy = [0.0f32; 8];
         band_energy[..7].copy_from_slice(bands);
+
+        let core_radius = self.core_frac * self.short_half();
 
         // Which kind of track is this? Everything below reads its constants out of the
         // blended archetype rather than from one global tuning.
@@ -874,6 +950,35 @@ impl Renderer {
             cfg.grand_release
         };
         self.grandness_env = ema(self.grandness_env, target_grand, tau, dt);
+
+        // --- Palette ---------------------------------------------------------------
+        // The colour is the song's, and it is meant to stay put. A deadband holds it
+        // exactly still until the material has moved a noticeable distance around the
+        // circle, and only then does it travel — on the short way round, so a song whose
+        // hue creeps past the wrap point does not sweep through every other colour to get
+        // to a neighbouring one.
+        //
+        // What this replaces was a continuous ~90 s hue rotation. That is a filter rather
+        // than a palette: it moves every pixel by the same angle, so the colour ends up
+        // being a property of when you happened to be watching instead of what is playing.
+        let target_hue = palette_target_hue(&audio.character);
+        let delta = circular_delta(self.palette_hue, target_hue);
+        if delta.abs() > 0.045 {
+            // Slow even once it is moving: this should read as a new song having a
+            // different colour, never as the colour animating.
+            self.palette_hue = (self.palette_hue + delta * (1.0 - (-dt / 20.0).exp()))
+                .rem_euclid(1.0);
+        }
+
+        // A dense mix gets a wider palette because it has the spectral content to justify
+        // more than one hue; a sparse one stays analogous and keeps its identity.
+        let target_spread = 0.10 + 0.32 * audio.character.density;
+        self.palette_spread = ema(self.palette_spread, target_spread, 20.0, dt);
+        // Dense mixes desaturate slightly — several saturated hues overlapping in a
+        // feedback loop average toward mud, and pulling the saturation back is what stops
+        // that without giving up the colour.
+        let target_sat = 0.82 - 0.28 * audio.character.density;
+        self.palette_sat = ema(self.palette_sat, target_sat, 20.0, dt);
 
         // Song-feel envelope. Very long time constants — ~8s to settle on a new feel,
         // ~16s to relax back — so this tracks the track, not the bar. Slower to fall so a
@@ -961,7 +1066,7 @@ impl Renderer {
             * (1.0 - smoothstep(0.40, 1.0, a));
         // Sized against the live core so it always reads as "the middle of the mandala is
         // gone" whatever the mandala has been set to, and expanding slightly while open.
-        let vacuum_radius = 0.62 * self.core_scale * vacuum * (0.80 + 0.40 * a);
+        let vacuum_radius = 0.62 * core_radius * vacuum * (0.80 + 0.40 * a);
 
         // Ripples are launched from the centre by onsets, and much harder by a rupture.
         // Only one wave travels at a time: a new launch takes over only if it would be
@@ -979,6 +1084,15 @@ impl Renderer {
             self.ripple_age = 0.0;
             self.ripple_amp = launch;
         }
+
+        // Orb radius, moved here from the shader because the warp needs it as well: the
+        // kaleidoscope fold has to know where the orb ends so it can begin outside it.
+        // Sized off the normalized level rather than raw RMS so it reaches the same size
+        // on a quiet master as on a loud one, and off whichever voice this kind of music
+        // leads with rather than off the bass unconditionally.
+        let voice = (bass_raw / total) * (1.0 - self.profile.drift)
+            + (mid_raw / total) * self.profile.drift;
+        let orb_radius = (0.10 + 0.30 * voice * (0.4 + level * 0.45)) * core_radius;
 
         // The outer field always drifts outward, on top of whatever the core is doing —
         // so the background streams away and fades rather than pulsing in place. Sustained
@@ -1004,12 +1118,12 @@ impl Renderer {
             _pad2: 0,
             warp_radial,
             feedback_decay,
-            hue_shift: self.hue_shift,
+            palette_hue: self.palette_hue,
             grandness: self.grandness_env,
             inject_gain: self.inject_gain * cfg.inject_mul,
             exposure: 1.0,
             organic: org,
-            core_scale: self.core_scale,
+            core_radius,
             warp_rotate,
             warp_spiral,
             warp_shear,
@@ -1025,6 +1139,12 @@ impl Renderer {
             ripple_age: self.ripple_age,
             ripple_amp: self.ripple_amp,
             bg_outflow,
+            // Widened on a grand moment: the separation is what makes a peak read as
+            // luminous rather than merely brighter.
+            chroma: self.chroma * (1.0 + 1.2 * self.grandness_env),
+            palette_spread: self.palette_spread,
+            palette_sat: self.palette_sat,
+            orb_radius,
             _pad3: 0.0,
         };
         self.uniforms.update(queue, &uniform_data);

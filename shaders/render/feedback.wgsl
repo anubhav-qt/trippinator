@@ -8,7 +8,7 @@
 // when it was a selectable mode — same shapes, tints, radii, and band bindings — so the
 // merged image is a true superposition, not a re-tune.
 //
-// Those four make up the central mandala, drawn in a frame shrunk by `u.core_scale`.
+// Those four make up the central mandala, drawn in a frame shrunk by `u.core_radius`.
 // Around it sits `layer_background`: a quiet ambient field that always tracks the music,
 // plus a grand tier gated on `grandness` that is absent the rest of the time. The mandala
 // says what is playing; the background says how it feels, and when something matters.
@@ -59,13 +59,13 @@ struct Uniforms {
 
     warp_radial: f32,
     feedback_decay: f32,
-    hue_shift: f32,
+    palette_hue: f32,
     grandness: f32,
 
     inject_gain: f32,
     exposure: f32,
     organic: f32,
-    core_scale: f32,
+    core_radius: f32,
 
     warp_rotate: f32,
     warp_spiral: f32,
@@ -85,6 +85,11 @@ struct Uniforms {
     ripple_age: f32,
     ripple_amp: f32,
     bg_outflow: f32,
+    chroma: f32,
+
+    palette_spread: f32,
+    palette_sat: f32,
+    orb_radius: f32,
     _pad3: f32,
 };
 
@@ -96,13 +101,22 @@ const TAU: f32 = 6.2831853;
 const PI: f32 = 3.14159265;
 
 // How fast a ripple wavefront travels outward, in frame units per second. At this rate a
-// wave launched at the centre reaches the top of a portrait frame in about two seconds.
+// wave launched at the centre reaches the end of a 16:9 frame in about two seconds.
 const RIPPLE_SPEED: f32 = 0.52;
 
-// NOTE ON UNITS: `p` is aspect-corrected, so on this portrait panel the frame is only
-// +/-0.5625 wide but +/-1.0 tall, and the corners sit at r = 1.147. Radii written as if
-// the frame were +/-1 in both axes — which is the natural mistake — land off the side of
-// the screen entirely.
+// NOTE ON UNITS: `p` is aspect-corrected, so the frame is always +/-1.0 tall and
+// +/-aspect wide. On a 1080x1920 portrait panel that is +/-0.5625 wide, with the corners
+// at r = 1.147; on a 1920x1080 landscape one it is +/-1.778 wide, corners at r = 2.04.
+// Radii written as if the frame were +/-1 in both axes — which is the natural mistake —
+// land off the side of a portrait screen entirely.
+//
+// NOTE ON ORIENTATION: this shader serves portrait and landscape from one code path, and
+// the aspect correction above is the reason it cannot do that by simply being rotated 90
+// degrees. The correction normalizes the *height* to 1 either way, so rotating the panel
+// does not swap the axes' roles — it changes which axis is the short one AND changes the
+// scale of everything measured against it. So nothing here may assume the tall axis is y.
+// Anything shaped to the panel is written with `oriented()` and `long_half()` below, in
+// terms of "along the long axis" and "across it", and works out either way.
 
 fn band(i: u32) -> f32 {
     if (i < 4u) { return u.band_energy[0][i]; }
@@ -113,6 +127,24 @@ fn band(i: u32) -> f32 {
 // Written this way because smoothstep(hi, lo, x) with reversed edges is undefined in WGSL.
 fn falloff(d: f32, radius: f32) -> f32 {
     return 1.0 - smoothstep(0.0, max(radius, 1e-4), d);
+}
+
+// Half-extent of the frame's long axis: 1.0 on a portrait 16:9 panel, 1.778 on a
+// landscape one. The short axis's half-extent is the other way round, and is not needed
+// here — `core_radius` and `orb_radius` arrive already scaled against it by the CPU,
+// which is also where `core_frac` is interpreted.
+fn long_half() -> f32 {
+    return max(u.resolution.x, u.resolution.y) / u.resolution.y;
+}
+
+// Build a vector from a component along the frame's long axis and one across it. This is
+// what keeps the panel-shaped constants orientation-agnostic: `oriented(1.15, 0.55)` is
+// "spread wide the long way, narrow the short way" on either orientation.
+fn oriented(along: f32, across: f32) -> vec2<f32> {
+    if (u.resolution.x > u.resolution.y) {
+        return vec2<f32>(along, across);
+    }
+    return vec2<f32>(across, along);
 }
 
 fn rot(a: f32) -> mat2x2<f32> {
@@ -328,7 +360,19 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // band between them reads as a hard faceted outline with the whole composition dragged
     // off centre. The fold is confined to the core by blending the two sampled *colours*
     // instead, which has no geometry to distort — see `fs_main`.
-    folded = mix(q, folded, smoothstep(0.0, 0.05, len));
+    //
+    // The identity region is sized to the ORB, not to a fixed 5% of the frame. That
+    // constant was the reason the core looked like a lit 3D ball rather than a flat dot:
+    // the orb spans r = 0.045 to 0.11 here, so the fold was fully active across almost all
+    // of it, and `fold_pos` aims every sample into a single wedge — meaning every pixel
+    // inside the orb drew its history from one angular sector. That is a light coming from
+    // one side, and because the fold frame rotates slowly, a light that slowly orbits.
+    //
+    // Inside the orb the warp is now only zoom and rotation about the centre, both of
+    // which are radially symmetric, so a radially symmetric injection stays radially
+    // symmetric however long it accumulates.
+    let fold_in = max(u.orb_radius, 1e-3);
+    folded = mix(q, folded, smoothstep(fold_in * 0.95, fold_in * 2.20, len));
 
     // Tumbling anisotropy in the zoom: the image breathes as a slowly turning ellipse
     // instead of a perfect circle. `warp_shear` adds a steady stretch along the same
@@ -460,8 +504,10 @@ fn layer_orb(p: vec2<f32>) -> vec3<f32> {
     // the bass unconditionally. Keying the centrepiece to a band that a sustained,
     // guitar-led track barely occupies left the orb near its minimum radius for the whole
     // song, which is the third of the three reasons that material came out looking thin.
-    let voice = mix(u.bass_w, u.mid_w, u.profile_drift);
-    let radius = 0.10 + 0.30 * voice * (0.4 + u.level_norm * 0.45);
+    // Computed on the CPU now, because the warp needs the same number — see the fold
+    // identity region in `warp_coord`. Converted back into the mandala's own space, which
+    // is what this function works in.
+    let radius = u.orb_radius / max(u.core_radius, 1e-4);
 
     let r = length(p);
     let a = atan2(p.y, p.x);
@@ -473,27 +519,32 @@ fn layer_orb(p: vec2<f32>) -> vec3<f32> {
     let r_eff = radius * (1.0 + wob * org * (0.5 + u.attack)
                                 * smoothstep(0.09, 0.20, radius));
 
-    // One tint across the whole body, and a purely radial brightness gradient: full at the
-    // centre, dimming out to the outline. Nothing here varies the hue with position.
+    // One tint across the whole body, and a brightness that is a function of RADIUS AND
+    // NOTHING ELSE. There is no angular term anywhere below — not in the brightness, not
+    // in the hue, not in the channel weighting — so every pixel at the same distance from
+    // the centre is identical by construction. That is the whole requirement: a flat 2D
+    // dot, brightest at the exact centre, dimming monotonically to its boundary, rather
+    // than a sphere with a lit side.
     //
-    // The interior churn and the per-channel limb dispersion that used to live here are
-    // gone on purpose. Both put *different colours in different places* inside the orb,
-    // and at any size where the orb is small that stops reading as texture and starts
-    // reading as two dots side by side — which is exactly what made it look off-centre.
-    // Whatever variety the orb has now comes from the tint moving as a whole, frame to
-    // frame, never from one side of it differing from the other.
+    // Two earlier attempts at "interest" inside the orb are gone for the same reason, and
+    // must not come back: interior churn and per-channel limb dispersion both put
+    // different colours in different places inside the body, and at any size where the orb
+    // is small that reads as two dots side by side instead of as texture. Whatever variety
+    // the orb has comes from the tint moving as a whole, never from one side differing
+    // from the other.
     let tint = mix(vec3<f32>(1.00, 0.55, 0.25), vec3<f32>(0.45, 0.75, 1.00), u.treble_w);
 
+    // Normalized radius, 0 at the centre and 1 at the boundary.
     let t = clamp(r / max(r_eff, 1e-3), 0.0, 1.0);
-    let body = falloff(r, r_eff);
-    // Squared toward the rim so the dimming is gentle through the middle and closes in
-    // faster at the edge, which keeps the outline legible instead of hazing out.
-    let profile = body * mix(1.0, body, 0.55);
+    let f = 1.0 - t;
 
-    // A small hot core so it still reads as an emitter rather than as a flat disc.
-    let core = pow(1.0 - t, 4.0) * 0.40;
+    // Strictly decreasing in t: gentle through the middle, closing faster toward the rim
+    // so the boundary stays legible instead of hazing out.
+    let profile = f * f * (0.35 + 0.65 * f);
+    // A tight hot centre on top, so the very middle is the brightest point in the image.
+    let core = pow(f, 6.0);
 
-    let orb = (tint * profile + vec3<f32>(1.0, 0.90, 0.80) * core)
+    let orb = (tint * profile + vec3<f32>(1.00, 0.94, 0.88) * core * 0.90)
             * (0.55 + u.attack * 0.8);
     return orb + wave_rings(p, radius);
 }
@@ -566,9 +617,9 @@ fn layer_constellation(p: vec2<f32>) -> vec3<f32> {
     let t = u.time * 0.05;
     for (var i = 0u; i < 7u; i = i + 1u) {
         let fi = f32(i);
-        var pos = vec2<f32>(
-            sin(t * (0.7 + fi * 0.13) + fi * 2.1) * 0.62,
-            cos(t * (0.5 + fi * 0.11) + fi * 1.3) * 0.80
+        var pos = oriented(
+            cos(t * (0.5 + fi * 0.11) + fi * 1.3) * 0.80,
+            sin(t * (0.7 + fi * 0.13) + fi * 2.1) * 0.62
         );
         pos += flow(vec2<f32>(fi * 7.3, u.time * 0.04)) * 0.09 * org;
 
@@ -625,10 +676,11 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
 
     // Opens just past the mandala's outer edge, as a multiple of the live core size so it
     // tracks whatever the core is set to instead of needing to be re-tuned alongside it.
-    // On a portrait panel the room this leaves is mostly above and below: at a large core
-    // the mandala already spans the short axis, so the sides are legitimately full and the
-    // top and bottom are where the background lives.
-    let outside = smoothstep(u.core_scale * 0.82, u.core_scale * 1.02, r);
+    // The room this leaves is mostly along the long axis: at a large core the mandala
+    // already spans the short axis, so the sides are legitimately full and the two ends of
+    // the panel are where the background lives. Which ends those are depends on the
+    // orientation, hence `oriented()` throughout below.
+    let outside = smoothstep(u.core_radius * 0.82, u.core_radius * 1.02, r);
     if (outside <= 0.0) {
         return vec3<f32>(0.0);
     }
@@ -648,24 +700,25 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     // it that moves with the music.
     // -----------------------------------------------------------------------
 
-    // The sampling frame is squashed horizontally, which stretches the noise features
-    // along the tall axis: on a 9:16 panel an isotropic field gives one or two features
-    // across the width and leaves the top and bottom as dead space, so the veil is shaped
+    // The sampling frame is squashed across its short axis, which stretches the noise
+    // features along the long one: on a 9:16 panel an isotropic field gives one or two
+    // features across the width and leaves the ends as dead space, so the veil is shaped
     // to the frame rather than to a square.
-    let vq = rot(u.time * 0.008) * (p * vec2<f32>(1.7, 0.85));
+    let vq = rot(u.time * 0.008) * (p * oriented(0.85, 1.7));
     let vn = fbm2(vq * 1.15 + flow(vq * 0.55 + drift) * (0.7 + 0.9 * org) + drift);
     let veil = pow(1.0 - abs(2.0 * vn - 1.0), 2.2);
     acc += tint * veil * (u.bg_ambient + 0.30 * u.level_norm + 0.07 * u.mid_w);
 
-    // Two broad pools anchored just off the top and bottom edges — the parts of a
-    // portrait frame the mandala can never reach, whatever the core is set to. Split by
-    // band so the two ends of the screen answer to different parts of the mix.
+    // Two broad pools anchored just off the two ends of the long axis — the parts of the
+    // frame the mandala can never reach, whatever the core is set to. Split by band so the
+    // two ends of the screen answer to different parts of the mix.
     // Which bands drive them follows the archetype: bass and brilliance for percussive
     // material, mid and high-mid for sustained material, where the lead lives.
     let low_voice = mix(band(1u), band(3u), u.profile_drift);
     let high_voice = mix(band(6u), band(4u), u.profile_drift);
-    acc += warm * falloff(length(p - vec2<f32>(0.0, 1.00)), 0.85) * (0.02 + 0.14 * low_voice);
-    acc += cool * falloff(length(p - vec2<f32>(0.0, -1.00)), 0.85) * (0.02 + 0.14 * high_voice);
+    let end = long_half();
+    acc += warm * falloff(length(p - oriented(end, 0.0)), 0.85) * (0.02 + 0.14 * low_voice);
+    acc += cool * falloff(length(p - oriented(-end, 0.0)), 0.85) * (0.02 + 0.14 * high_voice);
 
     // -----------------------------------------------------------------------
     // Grand tier — the part that only shows up on a real moment. Multiplied by the
@@ -679,7 +732,7 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
 
         // Curtains. The same ridged construction as the veil but raised to a much higher
         // power, so instead of a soft field it reads as thin bright folds of light.
-        let cq = rot(u.time * 0.011) * (p * vec2<f32>(1.5, 0.9));
+        let cq = rot(u.time * 0.011) * (p * oriented(0.9, 1.5));
         let cn = fbm2(cq * 1.6 + flow(cq * 0.7 - drift) * (0.8 + 1.0 * org) + drift);
         grand += mix(warm, cool, 0.15 + u.treble_w * 0.8)
                * pow(1.0 - abs(2.0 * cn - 1.0), 5.0)
@@ -693,10 +746,10 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
                * 0.80;
 
         // Deep-field blooms — very large, very soft, wandering on the flow field. Spread
-        // wide on y and narrow on x to match the frame they have to fill.
+        // wide along the long axis and narrow across it, to match the frame they fill.
         for (var i = 0u; i < 3u; i = i + 1u) {
             let fi = f32(i);
-            let c = flow(vec2<f32>(fi * 12.7, u.time * 0.02)) * vec2<f32>(0.55, 1.15);
+            let c = flow(vec2<f32>(fi * 12.7, u.time * 0.02)) * oriented(1.15, 0.55);
             grand += mix(warm, cool, fract(fi * 0.37 + 0.20))
                    * falloff(length(p - c), 0.55 + 0.15 * fi)
                    * (0.18 + band(i * 2u) * 0.45);
@@ -708,7 +761,7 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
         // so "the top of a big moment" means the same thing whatever opens the gate.
         let peak = smoothstep(u.bg_gate_hi * 1.15, u.bg_gate_hi * 1.90, u.grandness);
         if (peak > 0.0) {
-            let fq = rot(-u.time * 0.013) * (p * vec2<f32>(1.4, 0.9));
+            let fq = rot(-u.time * 0.013) * (p * oriented(0.9, 1.4));
             let fn_ = fbm2(fq * 2.6 + flow(fq * 1.1 - drift) * 1.4);
             grand += vec3<f32>(0.9, 0.85, 1.0)
                    * pow(1.0 - abs(2.0 * fn_ - 1.0), 22.0)
@@ -723,6 +776,29 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     return acc * outside * (0.55 + 0.45 * u.profile_drift);
 }
 
+// Sample the previous frame with the three channels warped by very slightly different
+// amounts — red from marginally further out, blue from marginally further in.
+//
+// A single frame of this is invisible; the point is that it sits inside the feedback loop,
+// so the separation compounds over the ~95 frames of trail into iridescent fringing along
+// every moving edge. That is the difference between colour as a global property of the
+// image and colour as something happening *in* it, and it is why the amount wants to be
+// far smaller than it looks like it should — a value that reads correctly for a single
+// frame tears the image into three within a second.
+//
+// Scaling about the frame centre rather than displacing means the separation grows with
+// radius, which is what a lens does and what keeps the middle clean.
+fn sample_chroma(uvc: vec2<f32>) -> vec3<f32> {
+    let c = vec2<f32>(0.5);
+    let d = uvc - c;
+    let lo = vec2<f32>(0.0);
+    let hi = vec2<f32>(1.0);
+    let r = textureSample(prev_frame, samp, clamp(c + d * (1.0 + u.chroma), lo, hi)).r;
+    let g = textureSample(prev_frame, samp, uvc).g;
+    let b = textureSample(prev_frame, samp, clamp(c + d * (1.0 - u.chroma), lo, hi)).b;
+    return vec3<f32>(r, g, b);
+}
+
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let aspect = u.resolution.x / u.resolution.y;
@@ -734,9 +810,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let fold_uv = (w.fold / to_uv) * 0.5 + vec2<f32>(0.5);
     let drift_uv = (w.drift / to_uv) * 0.5 + vec2<f32>(0.5);
 
-    // The fold aims every sample along one direction, and on a portrait panel that
-    // direction runs off the texture well inside the frame, so a large part of the image
-    // samples outside every frame. Three answers have been tried here and only the last
+    // The fold aims every sample along one direction, and that direction runs off the
+    // texture well inside the frame, so a large part of the image samples outside every
+    // frame. Three answers have been tried here and only the last
     // one holds up:
     //
     //  - clamping replicates the border pixel, and the loop sets that into hard
@@ -771,20 +847,20 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // was to be cleared quickly. Now that it flows out, it can be allowed to travel much
     // further before it goes — the outflow is what stops the wash, so the trail no longer
     // has to.
-    let outer = smoothstep(u.core_scale * 0.85, u.core_scale * 1.30, length(p));
+    let outer = smoothstep(u.core_radius * 0.85, u.core_radius * 1.30, length(p));
     let decay = pow(u.feedback_decay, 1.0 + 1.15 * outer);
 
     // Blend the two feedback samples by radius. Doing this in colour rather than in
     // coordinates is what keeps the kaleidoscope inside the core without a seam: the fold
     // builds the mandala, and beyond it the field simply flows, so there is exactly one
     // core on screen and the background is free to carry the feeling on its own terms.
-    let folded_prev = textureSample(prev_frame, samp, fold_s).rgb;
-    let drift_prev = textureSample(prev_frame, samp, drift_s).rgb;
+    let folded_prev = sample_chroma(fold_s);
+    let drift_prev = sample_chroma(drift_s);
     let decayed = mix(folded_prev, drift_prev, max(outer, escaped)) * decay;
 
     // The mandala is evaluated in a shrunken frame, so it occupies `core_scale` of the
     // radius it used to and everything beyond it belongs to the background.
-    let core = p / max(u.core_scale, 0.05);
+    let core = p / max(u.core_radius, 0.05);
 
     var injected = layer_orb(core)
                  + layer_spectral_ring(core)

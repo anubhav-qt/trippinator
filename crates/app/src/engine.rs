@@ -155,6 +155,11 @@ impl Engine {
         self.renderer.adjust_trail(factor);
     }
 
+    /// Scale the chromatic separation between the three channels' warps. Bound to `o`/`p`.
+    pub fn adjust_chroma(&mut self, factor: f32) {
+        self.renderer.adjust_chroma(factor);
+    }
+
     /// Nudge the kaleidoscope symmetry order.
     pub fn adjust_organic(&mut self, delta: f32) {
         self.renderer.adjust_organic(delta);
@@ -223,7 +228,7 @@ impl Engine {
         // look the way it should: `lvl` says whether the analysis thinks the music is
         // loud for this track, and the weights say which configuration it chose.
         log::info!(
-            "{fps:.0} fps | rms {:.3} | lvl {:.2} | bass {:.3} | mid {:.3} | treble {:.3}              | grand {:.2} | dyn {:.2} | vac {:.2} | pulse {:.2} drift {:.2} swarm {:.2}              | onsets {:.1}/s | organic {:.2} | core {:.2}",
+            "{fps:.0} fps | rms {:.3} | lvl {:.2} | bass {:.3} | mid {:.3} | treble {:.3}              | grand {:.2} | dyn {:.2} | vac {:.2} | pulse {:.2} drift {:.2} swarm {:.2}              | onsets {:.1}/s | hue {:.2} | organic {:.2} | core {:.2}",
             self.audio.instant.rms,
             self.audio.long_term.level_norm,
             self.audio.bands.energy[1],
@@ -236,6 +241,7 @@ impl Engine {
             p.drift,
             p.swarm,
             self.audio.character.onset_rate,
+            self.renderer.palette_hue(),
             self.renderer.organic(),
             self.renderer.core_scale(),
         );

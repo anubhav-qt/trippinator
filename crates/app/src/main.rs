@@ -145,12 +145,15 @@ impl ApplicationHandler for App {
                     // Symmetry: [ / ]. Brightness: - / =. Trail length: , / .
                     // Organic bias (shifts the song-feel envelope): ; / '.
                     // Mandala size (background is whatever is left over): k / l.
+                    // Chromatic separation: o / p.
                     if let Some(engine) = &mut self.engine {
                         match s.as_str() {
                             "[" => engine.nudge_symmetry(-1),
                             "]" => engine.nudge_symmetry(1),
                             "-" => engine.adjust_inject_gain(1.0 / 1.15),
                             "=" | "+" => engine.adjust_inject_gain(1.15),
+                            "o" | "O" => engine.adjust_chroma(1.0 / 1.25),
+                            "p" | "P" => engine.adjust_chroma(1.25),
                             "k" | "K" => engine.adjust_core_scale(1.0 / 1.1),
                             "l" | "L" => engine.adjust_core_scale(1.1),
                             ";" | ":" => engine.adjust_organic(-0.1),

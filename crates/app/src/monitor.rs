@@ -1,12 +1,17 @@
-//! Monitor detection — finds secondary portrait displays.
+//! Monitor detection.
+//!
+//! Prefers a secondary portrait display, but the renderer is orientation-native — see the
+//! ORIENTATION note in `shaders/render/feedback.wgsl` — so a landscape secondary, or the
+//! primary, is a perfectly good target and is used without any special casing.
 
 use log::info;
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
 
-/// Attempts to find a secondary monitor in portrait orientation.
+/// Attempts to find a secondary monitor, preferring a portrait one.
 ///
-/// Falls back to the primary monitor if no portrait secondary is found.
+/// Falls back to any secondary, then to the primary. Every one of those is usable: the
+/// visual adapts to the frame's aspect rather than assuming a tall panel.
 pub fn find_secondary_portrait_monitor(event_loop: &ActiveEventLoop) -> Option<MonitorHandle> {
     let monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
 

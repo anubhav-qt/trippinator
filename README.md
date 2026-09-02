@@ -1,7 +1,7 @@
 # trippinator
 
-A real-time audio visualizer for a secondary portrait display. It listens to whatever your
-system is playing and renders a feedback-loop organism on a 1080×1920 panel at ~178fps.
+A real-time audio visualizer for a secondary display, portrait or landscape. It listens to
+whatever your system is playing and renders a feedback-loop organism at ~178fps.
 
 The picture is built from two things that do different jobs:
 
@@ -22,7 +22,8 @@ history of the music rather than a picture of the current moment.
 - **Windows** (audio loopback capture is WASAPI via `cpal`)
 - A GPU with a working `wgpu` backend — Vulkan, DX12, or Metal
 - Rust (edition 2024 — needs a recent toolchain)
-- Ideally a **secondary portrait monitor**; it falls back to any secondary, then to primary
+- Any **secondary monitor**, portrait or landscape; it prefers a portrait secondary, then
+  any secondary, then the primary
 
 ## Run
 
@@ -44,8 +45,10 @@ logged so a value you like can be read back out of the terminal.
 | `-` / `=` | Injection brightness | Overall drive into the feedback loop |
 | `,` / `.` | Trail length | Seconds to fade to half brightness |
 | `[` / `]` | Kaleidoscope symmetry | Fold order, 3–12 |
-| `k` / `l` | Mandala size | The background is whatever is left over |
+| `k` / `l` | Mandala size | As a fraction of the frame's short axis |
+| `o` / `p` | Chromatic separation | How far the three channels' warps diverge |
 | `;` / `'` | Organic bias | Shifts the automatic song-feel mapping |
+
 | `F11` | Borderless fullscreen | |
 | `Esc` | Quit | |
 
@@ -157,6 +160,43 @@ the condition holds.
 whatever the core is doing, so the outer field streams outward and fades on the way rather
 than sitting where it was injected and pulsing in place. The mandala can tunnel inward
 while the field around it flows out.
+
+## Colour
+
+**The palette belongs to the song, not to the clock.** An earlier version drifted the hue
+continuously, ~90s per rotation. That is a filter rather than a palette — it moves every
+pixel by the same angle, so it changes what colour the image is without changing how it is
+coloured, and it makes the colour a property of when you happened to be watching.
+
+The hue is now derived from the song's slow spectral character (brightness primarily, with
+spectral tilt as a separating term) and then **held still**: a deadband stops it moving at
+all until the material genuinely changes, and when it does move it takes the short way
+round the circle rather than sweeping through every other colour to reach a neighbour. Two
+anchors a `palette_spread` apart give the bassy-vs-trebly differentiation, as two colours
+*of this song* rather than two points on a global wheel.
+
+There is deliberately **no entropy seed** in the palette, unlike the warp: the same song
+should move differently every run and be coloured the same every run.
+
+**Chromatic separation** (`o` / `p`) warps the three channels by very slightly different
+amounts. A single frame of it is invisible; the point is that it is inside the feedback
+loop, so the separation compounds over the trail into iridescent fringing along every
+moving edge. It wants to be far smaller than it looks like it should — a value that reads
+correctly for one frame tears the image into three within a second.
+
+## Portrait and landscape
+
+Both are native, and this is **not** a 90-degree rotation of one layout. The shader
+aspect-corrects to a frame that is always ±1.0 tall and ±aspect wide, so rotating the panel
+does not merely swap the axes' roles — it changes which axis is the short one *and* the
+scale of everything measured against it. A portrait 16:9 panel is ±0.5625 wide; a landscape
+one is ±1.778 wide.
+
+So nothing in the shader may assume the tall axis is `y`. Anything shaped to the panel — the
+veil's squash, the two edge pools, the deep-field blooms, the constellation's spread — is
+written through `oriented(along, across)` in terms of the long and short axes, and
+`core_frac` is a fraction of the **short** axis rather than an absolute radius. Both come
+out identical to the hand-tuned portrait values when the frame is portrait.
 
 ## Working on the shaders
 
