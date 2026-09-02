@@ -63,7 +63,11 @@ responsible when the visuals feel wrong:
   ceiling. This is what every level decision keys off, not raw `rms`, so that a quiet
   master reaches the same visual range as a loud one.
 - **`pulse` / `drift` / `swarm`** — which configuration the track is being given.
-- **`grand`** — the big-moment envelope.
+- **`grand`** — the big-moment envelope, and **`dyn`** — how much dynamic range the
+  material has. Nothing without range gets to be grand: a narration video or a stream sits
+  at one level indefinitely and so clears every ceiling-relative test there is, because its
+  ceiling *is* its normal level. `dyn` near 0 with `grand` near 0 on speech is correct.
+- **`vac`** — a vacuum event, 0 almost all the time by design.
 - **`organic`** — how far from strict geometry the image is being allowed to go.
 
 ## How it reacts
@@ -123,6 +127,36 @@ twice.
 Every component is a **rate per second** multiplied by `dt` in the shader. The constants
 these replaced were applied per frame, which made the speed of every motion in the image a
 function of how fast the GPU happened to be running.
+
+## Ruptures, ripples and the background
+
+**Ripples** are launched from the centre by onsets and travel outward as a wave packet,
+applied as a radial velocity so the space compresses ahead of the front and rarefies
+behind. Only one wave is in flight at a time; a new launch takes over only if it would be
+stronger than what is already travelling, so an ordinary beat cannot stomp the wave a drop
+just sent out.
+
+**Vacuum events** remove the middle of the image from the space rather than from the
+display. The warp carries the surrounding field outward, the history inside the hole is
+annihilated, and injection is masked — so for about a second there is genuinely no orb
+there, as opposed to a black disc drawn over one that is still running and still feeding
+the loop.
+
+They fire when a rupture detector sees a fast reading of a five-element feature vector
+(level, three spectral weights, centroid) pull away from a slow one. One test covers every
+case worth reacting to: the floor dropping out moves the level element, a bass slam moves
+level and balance together, a change of instrumentation moves balance and centroid with the
+level barely touched. The threshold is the track's own recent novelty statistics.
+
+**There is no limit on how often this can fire.** A track built out of drops gets a vacuum
+at every one of them. The only gate on repetition is hysteresis plus a 0.35 s debounce,
+which is edge detection — without it a single event fires on every frame for as long as
+the condition holds.
+
+**The background** carries an always-outward radial rate of its own, separate from
+whatever the core is doing, so the outer field streams outward and fades on the way rather
+than sitting where it was injected and pulsing in place. The mandala can tunnel inward
+while the field around it flows out.
 
 ## Working on the shaders
 
