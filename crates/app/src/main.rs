@@ -143,12 +143,18 @@ impl ApplicationHandler for App {
                 } else if let Key::Character(s) = &event.logical_key {
                     // Live tuning controls — see DESIGN.md.
                     // Symmetry: [ / ]. Brightness: - / =. Trail length: , / .
+                    // Organic bias (shifts the song-feel envelope): ; / '.
+                    // Mandala size (background is whatever is left over): k / l.
                     if let Some(engine) = &mut self.engine {
                         match s.as_str() {
                             "[" => engine.nudge_symmetry(-1),
                             "]" => engine.nudge_symmetry(1),
                             "-" => engine.adjust_inject_gain(1.0 / 1.15),
                             "=" | "+" => engine.adjust_inject_gain(1.15),
+                            "k" | "K" => engine.adjust_core_scale(1.0 / 1.1),
+                            "l" | "L" => engine.adjust_core_scale(1.1),
+                            ";" | ":" => engine.adjust_organic(-0.1),
+                            "'" | "\"" => engine.adjust_organic(0.1),
                             "," | "<" => engine.adjust_trail(1.0 / 1.2),
                             "." | ">" => engine.adjust_trail(1.2),
                             _ => {}

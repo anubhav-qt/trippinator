@@ -2293,6 +2293,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "log",
+ "naga",
  "trippinator-analysis-audio",
  "trippinator-renderer-gpu",
  "wgpu",
