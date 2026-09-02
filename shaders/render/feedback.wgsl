@@ -284,24 +284,24 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // already at 20% strength, and a few percent of translation per frame is invisible in
     // one frame and a bright displaced arc after ninety-five of them. Gate against the orb,
     // not against the frame.
-    // The gate has to clear the orb's LIGHT, not the orb's radius. Those are very
-    // different distances: the orb is a compact emitter feeding a trail ninety-five frames
-    // deep, so it lights the whole inner region well past its own edge. Starting the fold
-    // at 1.8x the radius put the ramp straight into that halo, and a partial fold aims
-    // what it touches into a wedge — which turns the orb's own light into a bright arc
-    // sitting beside it, in the orb's own colour. That is what the gold crescent was.
     //
-    // There is a real trade-off being made here and it is worth stating: a kaleidoscope
-    // fold aims light into wedges, and the orb is the brightest light in the frame, so
-    // "fold close to the centre" and "a clean isolated dot at the centre" cannot both be
-    // had. The fold is pushed out to where the mandala's other layers live and the centre
-    // is left alone.
+    // The gate clears the orb's BODY and then ramps in over a band about as wide again.
+    // It is deliberately not pushed out any further than that. Chasing the orb's halo —
+    // first to 1.8x, then to 3x, then to a floor of 0.45 * core_radius — removes nothing,
+    // because the halo has no outer edge to clear: the orb feeds a ninety-five frame
+    // trail, so its light is everywhere. All that moved was the radius at which the fold's
+    // concentration became visible, and by the last of those the fold only reached full
+    // strength at 1.6x the mandala's own radius, which switched the kaleidoscope off
+    // across the entire core. The fold IS the mandala; gating it out to nothing is not a
+    // fix for anything.
     //
-    // Floored against the mandala radius as well as the orb's, so it does not creep inward
-    // whenever the orb shrinks on quiet material.
+    // What the fold does near a bright compact source is concentrate its light into `sym`
+    // wedges. That is the intended behaviour and it reads as arms converging on the
+    // centre, given a smooth ramp and some other structure in the inner region for it to
+    // work on. It read as a single crescent welded to the orb only while the identity-hold
+    // disc below existed — see the note there for what was actually making it.
     let fold_in = max(u.orb_radius, 1e-3);
-    let gate_lo = max(fold_in * 3.0, u.core_radius * 0.45);
-    let dir_gate = smoothstep(gate_lo, gate_lo * 2.0, r0);
+    let dir_gate = smoothstep(fold_in * 1.15, fold_in * 2.60, r0);
 
     // Flow-field bend. Amplitude is deliberately ~1% of the frame: at this scale it
     // reads as the image being made of moving fluid, and much larger smears the trails
@@ -399,7 +399,7 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // off centre. The fold is confined to the core by blending the two sampled *colours*
     // instead, which has no geometry to distort — see `fs_main`.
     //
-    // The identity region is sized to the ORB, not to a fixed 5% of the frame. That
+    // The UNFOLDED region is sized to the ORB, not to a fixed 5% of the frame. That
     // constant was the reason the core looked like a lit 3D ball rather than a flat dot:
     // the orb spans r = 0.045 to 0.11 here, so the fold was fully active across almost all
     // of it, and `fold_pos` aims every sample into a single wedge — meaning every pixel
@@ -408,7 +408,8 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     //
     // Inside the orb the warp is now only zoom and rotation about the centre, both of
     // which are radially symmetric, so a radially symmetric injection stays radially
-    // symmetric however long it accumulates.
+    // symmetric however long it accumulates. Unfolded is not the same thing as frozen,
+    // and the difference matters — see the note above the return.
     // Same gate as the flow bend: a partially applied fold is a coordinate pulled toward
     // one direction by an amount that varies with radius, which across the orb's rim is a
     // brightness gradient down one side. No amount of making the injection symmetric fixes
@@ -433,51 +434,142 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // streams outward and fades on the way rather than sitting where it was injected and
     // pulsing in place. It is applied here and not in `z` so the core is unaffected: the
     // mandala can still tunnel inward while the field around it flows out.
-    // The zoom and the anisotropy are held at identity across the orb. Both are symmetric
-    // about the origin, so neither was ever a source of the crescent — they are held for
-    // two different reasons. The zoom, blooming outward, drains the centre faster than
-    // injection refills it and hollows the orb into a dark disc with a bright rim. The
-    // anisotropy is a 2% ellipse, invisible per frame, which over the depth of the trail
-    // makes a round dot visibly oval.
+    // THERE IS NO IDENTITY-HELD REGION AROUND THE ORB, AND THERE MUST NOT BE ONE.
     //
-    // Held here rather than by blending the finished coordinate back toward `p`, which is
-    // what this replaces: that also cancelled the ripple through the middle, and its own
-    // transition band left a fraction of the flow bend alive across the orb's rim.
-    let core_hold = 1.0 - smoothstep(fold_in * 1.25, fold_in * 2.20, r0);
-    let z_held = mix(z, 1.0, core_hold);
-    let aniso_held = mix(aniso, vec2<f32>(1.0), core_hold);
-    let drift_z = z_held * exp(-u.bg_outflow * u.dt * (1.0 - core_hold));
+    // One lived here and it was the bubble. Freezing the warp over a disc of 1.25x-2.20x
+    // the orb radius does three things at once, none of them wanted:
+    //
+    //  1. It kills the trail inside that disc. Every other pixel in the frame integrates
+    //     ~95 frames of history; a held pixel samples exactly itself, so it settles at
+    //     injection/(1 - decay) instead. Nothing is injected between the orb's rim and
+    //     2.2x it, so that annulus decays to black — a dark disc with the orb sitting in
+    //     the middle of it. That is the bubble, and each attempt to fix the bubble by
+    //     widening the hold made it bigger, because the hold IS the bubble.
+    //  2. It dims the orb by the same factor for the same reason, which is why the orb
+    //     came out as a tiny hot pinprick with no visible body: of its two terms only the
+    //     `pow(f, 6)` highlight survived being stripped of its trail.
+    //  3. The disc's boundary is a step in the warp's velocity field — zero inside,
+    //     differential rotation plus zoom immediately outside. The orb's halo piles up
+    //     against that step and winds along it, which is a bright arc in the orb's own
+    //     colour lying on the rim of the dark disc. That was the crescent. It was never
+    //     the fold. It was the edge of the fix.
+    //
+    // The orb is kept flat and radial by making the SAMPLING radially symmetric across
+    // it, not by stopping the sampling. `dir_gate` above is the whole mechanism: the flow
+    // bend and the kaleidoscope fold are the only two things in this function that can
+    // tell one side of the origin from the other, and they are held at zero across the
+    // orb. Everything left — zoom, ripple, vacuum, uniform and differential rotation, the
+    // tumbling anisotropy — is symmetric about the origin, so it carries a radially
+    // symmetric injection to a radially symmetric result however long it accumulates.
+    // Symmetric motion is not the enemy of a flat dot; asymmetric motion is.
+    let drift_z = z * exp(-u.bg_outflow * u.dt);
 
-    let fold_out = axis * ((transpose(axis) * folded) * aniso_held) * z_held;
-    let drift_out = axis * ((transpose(axis) * q) * aniso_held) * drift_z;
+    let fold_out = axis * ((transpose(axis) * folded) * aniso) * z;
+    let drift_out = axis * ((transpose(axis) * q) * aniso) * drift_z;
 
-    // Inside the orb the warp is the IDENTITY. Not "mostly radial", not "symmetric" —
-    // the pixel samples exactly itself, so that region is its own injection decayed to
-    // equilibrium and nothing else. That makes it a clean radial dot by construction.
-    //
-    // Making the fold symmetric there was not enough on its own. A symmetric warp is
-    // still a warp: with the radial rate blooming outward, the centre drains faster than
-    // injection refills it, so the orb came out as a dark hole with a bright rim — which
-    // is what read as a glass bubble with a highlight on one side. Holding the coordinate
-    // still removes the drain rather than compensating for it.
-    //
-    // Consequence worth knowing: a ripple now emanates from the orb's edge rather than
-    // from the exact centre, because there is no motion inside the hold region to carry
-    // it.
     return Warp(fold_out, drift_out);
 }
-// The four concentric "wave rings" that used to live here are gone deliberately.
+// Four concentric wave rings sitting outside the central orb, separated from it by a
+// gap. Each ring is a closed wave function r(theta) = base + amp*sin(lobes*theta + phase),
+// bound to a different band so they articulate independently — different lobe count,
+// different drift rate, different tint. They never move in lockstep, which is what stops
+// them reading as four copies of one animation.
 //
-// They were drawn relative to the orb, at its radius plus a gap, which made them a set
-// of shells hugging it — and a shell around a bright centre reads as a bubble with the
-// orb suspended inside it, which is not what the middle of this is meant to be. Closing
-// the gap so they sat directly on the orb made it worse rather than better: the rings
-// are angularly lobed, so at the orb's rim they shaded one side of it and turned a flat
-// dot into a lit sphere.
+// On top of that each ring has its own life: it spins at its own rate and direction
+// (faster when its band is loud), its shape *function* morphs — the lobe count drifts
+// fractionally, a second harmonic fades in and out, and a cusped term crossfades against
+// the smooth sine so the outline travels between star-like and wave-like — it hangs
+// slightly off-center on its own small orbit, and its stroke density varies around the
+// circumference so it can thin to almost nothing on one side. They still translate and
+// scale with the orb, because every radius here is still relative to the orb's own.
 //
-// If something is wanted between the orb and the spectral ring, it must not be
-// concentric with the orb and must not carry an angular term near its rim. Recover the
-// old implementation from git history rather than rewriting it from this description.
+// This layer was deleted once, on the theory that four rings concentric with a bright
+// centre are by definition a bubble around it. They are not, and the screenshot taken
+// afterwards settled it: the bubble was still there with the rings gone. What the rings
+// actually do is give the inner region structure, so that the orb is not the only thing
+// in the middle of the frame for the kaleidoscope to find.
+//
+// The `gap` is back at its tuned 0.16 rather than the 0.03 it was pushed to. Sitting the
+// rings directly on the orb's rim is the one arrangement that genuinely does shade it:
+// the rings are angularly lobed, so at the rim their lobes become a brightness gradient
+// down one side of the dot. The gap is what keeps the orb's outline its own.
+fn wave_rings(p: vec2<f32>, orb_radius: f32) -> vec3<f32> {
+    let org = u.organic;
+    var acc = vec3<f32>(0.0);
+
+    // bass, mid, high-mid, brilliance — four distinct voices across the spectrum.
+    var band_of_ring = array<u32, 4>(1u, 3u, 4u, 6u);
+    let gap = 0.16;
+
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let fi = f32(i);
+        let e = band(band_of_ring[i]);
+
+        // Alternating spin direction; a loud band spins its own ring faster.
+        let dir = select(-1.0, 1.0, (i % 2u) == 0u);
+        let spin = dir * (0.10 + 0.09 * fi + 0.55 * e) * org;
+
+        // Each ring hangs on its own small orbit around the orb center. Small enough
+        // that the set still reads as concentric, large enough to break the "all drawn
+        // with one compass" look.
+        let wob_a = u.time * (0.11 + 0.05 * fi) * org + fi * 2.4;
+        let center = vec2<f32>(cos(wob_a), sin(wob_a * 1.3))
+                   * (0.012 + 0.020 * fi) * org * (0.5 + e);
+        let d = p - center;
+
+        let r = length(d);
+        let a = atan2(d.y, d.x) + u.time * spin;
+
+        let base_r = orb_radius + gap + 0.17 * fi;
+
+        // Starts at 5, not 3: a 3-lobe ring is literally a rounded triangle, and on
+        // loud bass its amplitude pushes it far enough out to read as a stray outline
+        // rather than as ring texture. Low-order lobes look like shapes; higher ones
+        // look like surface.
+        //
+        // The lobe count drifts, but a fractional harmonic is not periodic in the angle,
+        // so it would tear the ring at the branch cut (invariant 3). Crossfading the two
+        // integer harmonics either side of the drift gives the same "count is changing"
+        // read, with the amplitude beat between them as a bonus, and stays closed.
+        let lobes_f = 5.0 + fi * 2.0 + 0.9 * org * sin(u.time * 0.047 + fi);
+        let l0 = floor(lobes_f);
+        let lb = smoothstep(0.0, 1.0, fract(lobes_f));
+        let lobes2 = l0 * 2.0 + 1.0;
+        let phase = u.time * (0.13 + 0.07 * fi) + fi * 1.7;
+
+        // Shape morph: smooth sine <-> cusped triangle wave, plus a second harmonic that
+        // comes and goes. This is the ring changing its own function, not just its phase.
+        let smooth_w = mix(sin(a * l0 + phase), sin(a * (l0 + 1.0) + phase), lb);
+        let cusp_w = mix(
+            1.0 - 4.0 * abs(fract(a * l0 / TAU + phase * 0.16) - 0.5),
+            1.0 - 4.0 * abs(fract(a * (l0 + 1.0) / TAU + phase * 0.16) - 0.5),
+            lb
+        );
+        let morph = 0.5 + 0.5 * sin(u.time * 0.061 + fi * 1.9);
+        let harm = (0.5 + 0.5 * sin(u.time * 0.083 + fi * 0.7)) * 0.45 * org;
+
+        var shape = mix(smooth_w, cusp_w, clamp(morph * org, 0.0, 1.0));
+        shape += sin(a * lobes2 - phase * 1.4) * harm;
+
+        // Slow elliptical squash of the ring itself, on its own turning axis.
+        let sq = 1.0 + 0.06 * org * sin(a * 2.0 - u.time * (0.05 + 0.02 * fi) * org);
+
+        let ring_r = base_r * sq + shape * (0.015 + 0.055 * e);
+
+        // Stroke density varies around the circumference, so the ring breathes in and
+        // out of existence along its length instead of being a uniform hoop. Centered
+        // near 1.0 so this does not quietly dim the layer.
+        let dens = mix(
+            1.0,
+            0.55 + 0.9 * ang_noise(a, 1.6, u.time * 0.09 + fi * 3.0),
+            org * 0.8
+        );
+
+        let tint = mix(vec3<f32>(1.0, 0.5, 0.2), vec3<f32>(0.35, 0.75, 1.0), fi / 3.0);
+        acc += tint * falloff(abs(r - ring_r), 0.012 + 0.010 * e) * (0.12 + e * 1.1) * dens;
+    }
+    return acc;
+}
 
 
 fn layer_orb(p: vec2<f32>) -> vec3<f32> {
@@ -856,7 +948,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // radius it used to and everything beyond it belongs to the background.
     let core = p / max(u.core_radius, 0.05);
 
+    // The rings are drawn in the mandala's frame, off the orb's radius expressed in that
+    // same frame — the conversion `layer_orb` does for itself.
     var injected = layer_orb(core)
+                 + wave_rings(core, u.orb_radius / max(u.core_radius, 1e-4))
                  + layer_spectral_ring(core)
                  + layer_point_emitters(core)
                  + layer_constellation(p)
