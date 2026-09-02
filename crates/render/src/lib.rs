@@ -201,7 +201,21 @@ fn song_feel(audio: &AudioFeatures, grandness: f32, bass_w: f32, mid_w: f32, tre
 /// about anything else in this space. The spectral tilt is a secondary term, there to
 /// separate songs that happen to share a centroid.
 fn palette_target_hue(c: &SongCharacter) -> f32 {
-    let bright = smoothstep(0.03, 0.30, c.brightness);
+    // `c.brightness` is spectral centroid normalized against Nyquist (24 kHz at the
+    // 48 kHz capture rate), and music does not use anything close to that much range:
+    // energy falls off with frequency, so even a bright, hi-hat-forward mix centres
+    // around 3-5 kHz — a centroid at 30% of Nyquist would be 7.2 kHz, which is a
+    // pathological amount of top end. The old edges (0.03, 0.30) treated 30% of Nyquist
+    // as "fully bright", so ordinary material never reached even the middle of that
+    // range and every song scored `bright` near 0 — which is why the palette was
+    // clamped to red and amber regardless of what was playing, the reported bug.
+    //
+    // Recalibrated against where real centroids actually sit: dark/bass-heavy material
+    // under ~500 Hz (norm 0.02), a bright, energetic mix around 4.3 kHz (norm 0.18).
+    // That is still a wide span in absolute terms, but it is the span music actually
+    // occupies, so the palette now spends its time somewhere between amber and cyan
+    // instead of pinned at one end of it.
+    let bright = smoothstep(0.02, 0.18, c.brightness);
     // 0.02 (deep red) through amber, green and cyan to 0.78 (violet).
     let base = 0.02 + 0.76 * bright;
     let tilt = (c.treble_w - c.bass_w) * 0.10;

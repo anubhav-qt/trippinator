@@ -153,6 +153,16 @@ fn rot(a: f32) -> mat2x2<f32> {
     return mat2x2<f32>(c, s, -s, c);
 }
 
+// Same construction as `hsv` in color.wgsl, duplicated here rather than shared because
+// this file has no include mechanism and every other file-scoped constant here is
+// likewise self-contained. Used to build the background's and orb's warm/cool anchors
+// from the song's actual palette instead of a fixed pair — see the note by `song_low`
+// below for why that matters.
+fn hsv(h: f32, s: f32) -> vec3<f32> {
+    let p = abs(fract(vec3<f32>(h) + vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return mix(vec3<f32>(1.0), clamp(p - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), s);
+}
+
 // ---------------------------------------------------------------------------
 // Cheap value noise. Used only for *slow, low-amplitude* modulation — never as
 // per-pixel texture, which would read as static rather than as motion.
@@ -638,7 +648,16 @@ fn layer_orb(p: vec2<f32>) -> vec3<f32> {
     // is small that reads as two dots side by side instead of as texture. Whatever variety
     // the orb has comes from the tint moving as a whole, never from one side differing
     // from the other.
-    let tint = mix(vec3<f32>(1.00, 0.55, 0.25), vec3<f32>(0.45, 0.75, 1.00), u.treble_w);
+    //
+    // The two endpoints are the song's own primary and partner hue, not a fixed
+    // orange/blue pair. They used to be a literal `vec3(1.00, 0.55, 0.25)` and
+    // `vec3(0.45, 0.75, 1.00)`, so however the song's palette moved the orb stayed
+    // orange leaning blue at high treble — never green, never violet, never red for a
+    // bright track. Pulling from `u.palette_hue` ties the centrepiece to the same colour
+    // identity as the rest of the mandala instead of running its own separate axis.
+    let tint = mix(hsv(u.palette_hue, u.palette_sat),
+                    hsv(fract(u.palette_hue + u.palette_spread), u.palette_sat * 0.85),
+                    u.treble_w);
 
     // Normalized radius, 0 at the centre and 1 at the boundary.
     let t = clamp(r / max(r_eff, 1e-3), 0.0, 1.0);
@@ -792,8 +811,17 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     }
 
     let org = u.organic;
-    let warm = vec3<f32>(1.00, 0.42, 0.18);
-    let cool = vec3<f32>(0.25, 0.60, 1.00);
+    // `warm` and `cool` are the mandala's own two anchors — the song's primary hue and
+    // its partner, the same pair `color.wgsl` builds from `u.palette_hue`/`palette_spread`
+    // — not a fixed orange/blue pair. They used to be a literal `vec3(1.00, 0.42, 0.18)`
+    // and `vec3(0.25, 0.60, 1.00)`, which is the reported bug: the background is the
+    // biggest area on screen, so whatever the song's actual palette computed, the room
+    // around the mandala stayed orange fading to blue regardless, and only fully reached
+    // blue on the rare track where `treble_w` is high. Everything below this line still
+    // reads as it did — the warm/cool split by voice, the two-tier gating, the grand
+    // tier's shapes — only the two colours it splits between now belong to the song.
+    let warm = hsv(u.palette_hue, u.palette_sat);
+    let cool = hsv(fract(u.palette_hue + u.palette_spread), u.palette_sat * 0.85);
     let tint = mix(warm, cool, clamp(0.15 + u.treble_w * 0.9, 0.0, 1.0));
     let drift = vec2<f32>(u.time * 0.023, u.time * -0.017);
 
