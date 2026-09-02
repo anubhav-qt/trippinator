@@ -284,8 +284,24 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // already at 20% strength, and a few percent of translation per frame is invisible in
     // one frame and a bright displaced arc after ninety-five of them. Gate against the orb,
     // not against the frame.
+    // The gate has to clear the orb's LIGHT, not the orb's radius. Those are very
+    // different distances: the orb is a compact emitter feeding a trail ninety-five frames
+    // deep, so it lights the whole inner region well past its own edge. Starting the fold
+    // at 1.8x the radius put the ramp straight into that halo, and a partial fold aims
+    // what it touches into a wedge — which turns the orb's own light into a bright arc
+    // sitting beside it, in the orb's own colour. That is what the gold crescent was.
+    //
+    // There is a real trade-off being made here and it is worth stating: a kaleidoscope
+    // fold aims light into wedges, and the orb is the brightest light in the frame, so
+    // "fold close to the centre" and "a clean isolated dot at the centre" cannot both be
+    // had. The fold is pushed out to where the mandala's other layers live and the centre
+    // is left alone.
+    //
+    // Floored against the mandala radius as well as the orb's, so it does not creep inward
+    // whenever the orb shrinks on quiet material.
     let fold_in = max(u.orb_radius, 1e-3);
-    let dir_gate = smoothstep(fold_in * 1.8, fold_in * 4.0, r0);
+    let gate_lo = max(fold_in * 3.0, u.core_radius * 0.45);
+    let dir_gate = smoothstep(gate_lo, gate_lo * 2.0, r0);
 
     // Flow-field bend. Amplitude is deliberately ~1% of the frame: at this scale it
     // reads as the image being made of moving fluid, and much larger smears the trails
