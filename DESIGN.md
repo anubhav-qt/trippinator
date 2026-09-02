@@ -1,8 +1,26 @@
 # Trippinator — Design
 
-An audio- and desktop-reactive visualizer for a secondary portrait monitor (1080x1920).
+An audio- and desktop-reactive visualizer for a secondary monitor, portrait or landscape.
 Runs alongside music *and* games, as ambient immersion — an extension of whatever is on
 the main screen, not a thing that competes with it.
+
+> **This document is intent, not specification, and it lags the code.**
+>
+> It is where the reasoning lives — why a mechanism was chosen, what it is trying to buy,
+> what went wrong last time. It is *not* a description of what is currently built, and
+> parts of it describe approaches that were tried and replaced. **When the two disagree,
+> the code is right and this file is out of date.**
+>
+> Sections carry a marker so the difference is visible at a glance:
+>
+> - `[DONE]` — built, and the code matches this description.
+> - `[PLANNED]` — not built. Written down so the idea is not lost, not because it is next.
+> - `[SUPERSEDED]` — was built or was intended, and has since been replaced. The text is
+>   kept because the reasoning is still useful; the note says what replaced it.
+>
+> Anything unmarked is background reasoning that is not a claim about the code.
+> Update the marker in the same change that makes it wrong. If you are about to build
+> something because this document describes it, check the code first.
 
 ## The governing idea
 
@@ -63,6 +81,28 @@ identical at 60 and 165 fps.
 **Divergence budget.** Thomas has λ₁ ≈ 0.05 per time unit at b=0.208. Scaling time so one
 unit ≈ 0.2 s, a 1e-6 seed difference reaches O(1) in roughly 30–60 s — two runs of the same
 track visibly part ways inside the first verse, which is what we want.
+
+### Colour comes from the song, not the clock `[DONE]`
+
+An earlier version drifted the hue continuously, ~90 s per rotation, on the reasoning in
+"timescale hierarchy" below: a process slower than the viewing session means the session
+cannot contain a repeat.
+
+**That was rejected on use.** A slow global hue rotation is a filter, not a palette — it
+moves every pixel by the same angle, so it changes what colour the image is without
+changing how it is coloured, and it makes the colour a property of *when you are watching*
+rather than of what is playing. Two different songs an hour apart look like the same song
+under different lighting.
+
+The palette is now derived from the song's own slow spectral character and then **held
+still**: a deadband stops it moving at all until the material genuinely changes, and it
+moves on the short way round the hue circle when it does. A song has a colour; it keeps
+it. This is a deliberate exception to the never-repeat principle — colour identity is worth
+more here than colour novelty, and the novelty budget is spent on geometry and motion
+instead.
+
+Note the contrast with the warp, which *is* entropy-seeded per run: the same song should
+move differently every time and be coloured the same every time.
 
 ### Slow layer: quasi-periodic phases
 
@@ -129,15 +169,24 @@ parameter manifold with reflecting boundaries at the hand-tuned safe limits.
 Design target: **the slowest process in the system must have a period longer than a
 viewing session.** If it does, the session cannot contain a repeat.
 
-### 2. Discrete structural switching — variety of kind
+### 2. Discrete structural switching — variety of kind `[SUPERSEDED]`
+
+> **Replaced by song archetypes and the parameterized warp.** The five warp topologies and
+> four injection geometries below were built as selectable modes and then collapsed: the
+> injection layers all render *together* (they compose better than they alternate), and the
+> single kaleidoscope warp was parameterized into six continuous components instead of five
+> discrete variants. Structural variety now comes from the archetype blend and the warp
+> character, not from switching. `symmetry` is the only discrete axis left, and it is on a
+> key rather than driven by an attractor. **There are no `warp_mode` or `inject_mode`
+> uniforms and there never will be — do not go looking for them.**
 
 Continuous modulation of one structure always reads as "one visual with a knob wiggling."
 Genuine novelty needs changes of *kind*. Poincaré-section crossings of the attractor —
 aperiodic and unpredictable by construction — trigger discrete jumps:
 
 - kaleidoscope symmetry order (3–10, 8 values)
-- warp topology (5 variants — see Phase 1)
-- injection geometry (4 variants — see Phase 1)
+- warp topology (5 variants)
+- injection geometry (4 variants)
 
 8 × 5 × 4 = 160 structural combinations, walked in a non-repeating order.
 Combinatorial novelty dominates continuous novelty; this is the largest single
@@ -243,6 +292,49 @@ answers "kind," spectral balance answers "genre." Both are needed — a dubstep 
 piano ballad should not just be different *frames* of the same look, they should read as
 different *moods* of it.
 
+## Song archetypes (configuration, not just modulation) `[DONE]`
+
+Spectral balance turned out to be necessary and not sufficient, and the gap is instructive.
+It differentiates *what the palette and the shapes do* while leaving every threshold,
+time constant and warp direction global — so the whole pipeline was still tuned against one
+kind of music, and material built the other way round fell outside it. Two failures, on
+real tracks:
+
+- **A sustained lead over a held chord registered as nothing.** "Grandness" was energy
+  against a rolling baseline, and the baseline was a 180-frame ring buffer — one second at
+  the frame rate this actually runs at. Sustained music raises its own one-second baseline
+  as it swells, so a two-minute guitar solo sat at a ratio of ~1.0 for its entire length and
+  the visual treated the biggest passage in the song as ordinary playing.
+- **A dynamic-range-preserving master never cleared the absolute gate.** The second half of
+  the grandness test was `smoothstep(0.04, 0.12, rms)`, calibrated against a loud modern
+  master. An older mix with real headroom is quieter everywhere, so however grand the
+  passage, it failed the gate.
+
+Both are the same mistake: a constant that encodes an assumption about the material.
+
+The fix is two-part. **Normalize level against the track**, not against an absolute: a
+60-second loudness ceiling (fast attack, slow release) makes every level judgement
+master-independent. And **classify the material and blend between parameter sets**, from
+slow features — onset rate, crest factor, spectral occupancy — with time constants in the
+tens of seconds:
+
+| | pulse | drift | swarm |
+|---|---|---|---|
+| Material | transient-led | sustain-led | dense, loud |
+| Grandness path | hit vs. local context | sustained near the ceiling | both |
+| Envelope | 0.4 s / 2.5 s | 1.6 s / 6 s | 0.7 s / 3.5 s |
+| Warp | tunnels inward | blooms outward, turns | fast tunnel, counter-rotates |
+
+Weights sum to 1 and every downstream parameter is a linear blend, so this is a continuous
+field rather than a mode switch — no snapping, and a track between two archetypes gets a
+configuration between them.
+
+Note how this interacts with the safety contract: per-archetype limits are *tighter* than a
+global one could be. `drift` can hold grandness near the top for minutes, so its outward
+bloom is a sixth of `pulse`'s — a bloom sized for a two-second transient would empty the
+frame and keep it empty for the whole solo. A single global constant would have to be safe
+for the worst case and would therefore be timid in every other one.
+
 ## Render graph
 
 Ping-pong two `RGBA16Float` textures at native portrait resolution.
@@ -258,6 +350,22 @@ Ping-pong two `RGBA16Float` textures at native portrait resolution.
               tone map, bloom, dither to kill banding on gradients
 4. PRESENT
 ```
+
+**What is actually built** — inject and warp are *one* pass, not two, because injection
+needs the same warped coordinate space as the feedback sample; splitting them adds a
+texture round-trip and buys nothing. So the real graph is two passes, not four.
+
+Three items in that sketch are not built and should not be assumed:
+
+- **Curl-noise advection `[PLANNED]`.** What exists is `flow()`, which returns two
+  *independent* fbm channels. That is not curl noise: it has nonzero divergence, so it
+  creates sources and sinks and the material pools and thins. Curl noise is the
+  perpendicular gradient of a single scalar potential and is divergence-free, which is
+  what makes it look like fluid rather than like noise pushing things around.
+- **Screen motion field `[PLANNED]`** — Phase 3, nothing is wired.
+- **Bloom `[PLANNED]`** — the color pass is palette, tonemap, dither.
+
+And the palette is `[SUPERSEDED]`: see "Colour comes from the song, not the clock".
 
 Trivial load for a 5070 at 1080x1920. Budget is nowhere near the constraint; restraint is.
 
@@ -287,11 +395,14 @@ assumption. `loopback.rs` was never broken. The `Energy: 0.00` in the old log wa
 because nothing was playing, not a capture bug. Verified live: `bass 0.997` while audio
 played, mirrored in `rms`. No code change was needed.
 
-**Phase 1 — feedback core + structural variants.** Inject + warp + color, hot-reloaded
-shaders, static hand-tuned parameters — but the warp and injection stages are `switch`
-statements over their variants from the start, switchable by hand with a key. Goal: a
-handful of structurally distinct looks that already look good with no dynamics at all.
-Building the variants late is how the pipeline ends up hard-coded around one of them.
+**Phase 1 — feedback core. `[DONE, in part]`** Inject + warp + color with hand-tuned
+parameters. The `switch`-over-variants part was built and then collapsed — see
+"Discrete structural switching" above.
+
+**Shader hot-reload is `[PLANNED]`, not done.** Shaders are `include_str!`d, so they are
+baked in at compile time and a tweak costs a rebuild. The paragraph below calling it "not
+optional" was right about the cost and wrong about the schedule; a release build is fast
+enough that this has not yet been the bottleneck it was predicted to be.
 
 **Phase 2 — dynamics.** Thomas + phases + the mapping layer + slow drift of the safe box,
 wired to the Phase 1 parameters, with structural switching on Poincaré crossings. Goal: it
@@ -306,8 +417,63 @@ actual game.
 
 **Phase 4 — tuning.** Presets, seed control, a debug overlay for live parameter tweaking.
 
-Shader hot-reload lands in Phase 1 and is not optional — visual work is iteration-bound,
-and a recompile per tweak makes tuning impossible in practice.
+Shader hot-reload was specified to land in Phase 1 and did not — see above. Visual work
+is iteration-bound and this is still worth doing, but live-tunable uniforms on keys have
+covered most of the need.
+
+## The open gap: authored content vs. emergent content `[PLANNED]`
+
+The governing idea at the top says *"Input perturbs that system. Input does not draw the
+image."* That is currently only half true, and it is the largest gap between what this
+looks like and what it is trying to be.
+
+The feedback loop is genuinely emergent. The *content* fed into it is not: `layer_orb`,
+`layer_spectral_ring`, `layer_point_emitters`, `layer_constellation` and the background
+tiers place specific shapes at specific radii in specific tints. That is illustration
+parameterized by audio, wrapped in an emergent process. Two consequences, both worth
+fixing, in priority order:
+
+### 1. Spatial frequency is too low — reaction–diffusion tier
+
+Every drawn element is a `falloff()`, which is `1 - smoothstep`: a smooth gradient with no
+high-frequency content anywhere. `fbm2` is deliberately restricted to low-amplitude
+modulation and explicitly never used as per-pixel texture. So the image is soft blobs and
+trails, and no amount of good motion makes soft blobs read as the dense, ornamented,
+resolves-into-more-detail quality this is aiming at.
+
+The fix is not "add noise texture" — it is to put a **pattern-forming system** in the loop
+so the fine structure is generated rather than drawn. Gray–Scott reaction–diffusion is the
+obvious candidate: it produces exactly the dense self-organizing organic structure wanted,
+it is the canonical instance of beauty out of pure math, and *it is already the
+architecture* — a two-species ping-pong over a texture, which is what this renderer is.
+
+Sketch: a third target pair carrying (U, V), advected by the same warp, with feed/kill
+rates modulated inside a hand-checked safe range by audio and by the archetype (the
+feed/kill plane has well-mapped regions — spots, stripes, worms, mitosis — and moving
+between them is a genuine change of *kind*, which is what the abandoned structural
+switching was trying to buy). Composite V into the injection rather than replacing it, on
+a live key, so it can be A/B'd against the current look.
+
+Care needed: reaction–diffusion is resolution-dependent and frame-rate-sensitive in a way
+the rest of this is not. It wants a fixed simulation timestep on an accumulator and its own
+fixed-size target, not the swapchain's.
+
+### 2. The actual mathematics of the form constants — log-polar warp
+
+Klüver's form constants — lattices, honeycombs, cobwebs, tunnels, spirals — are what
+hallucinated geometry actually consists of, and they have a known mechanism: the
+retino-cortical map is approximately log-polar, so a plane wave in cortical coordinates
+maps to a spiral, tunnel or ring in the visual field (Bressloff, Cowan, Golubitsky, Thomas
+and Wiener, 2001).
+
+Tunnels and spirals appear here *incidentally*, as a side effect of the feedback zoom.
+Doing the warp in log-polar space — `(log r, theta)` — would produce them *structurally*,
+and would also give the lattice and honeycomb constants, which nothing in the current
+pipeline can produce at all. It is a small change to `warp_coord` and it is the highest
+ratio of payoff to lines in this document.
+
+Note that the existing invariant 3 (everything periodic in TAU, no discontinuity at the
+atan2 branch cut) becomes *more* load-bearing here, not less.
 
 ## What went wrong last time
 

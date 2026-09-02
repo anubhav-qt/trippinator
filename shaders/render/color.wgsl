@@ -1,7 +1,14 @@
 // Trippinator — Color Pass
 //
-// Palette maps the HDR feedback result by spectral balance, applies a slow always-on
-// hue drift, tone maps, and dithers to kill banding on the portrait panel's gradients.
+// Palette maps the HDR feedback result into the song's own colours, tone maps, and
+// dithers to kill banding on the panel's gradients.
+//
+// The palette is built from `palette_hue` and `palette_spread`, both derived on the CPU
+// from slow spectral character and then held still. What this replaced was a fixed
+// warm/mid/cool triple passed through a continuous hue rotation, which is a filter rather
+// than a palette: rotating every pixel by the same angle changes what colour the image is
+// without changing how it is coloured, and it made the colour a property of when you were
+// watching rather than of what was playing.
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -25,26 +32,52 @@ struct Uniforms {
     _pad1: u32,
     _pad2: u32,
 
-    zoom: f32,
+    warp_radial: f32,
     feedback_decay: f32,
-    hue_shift: f32,
+    palette_hue: f32,
     grandness: f32,
 
     inject_gain: f32,
     exposure: f32,
     organic: f32,
-    core_scale: f32,
+    core_radius: f32,
+
+    warp_rotate: f32,
+    warp_spiral: f32,
+    warp_shear: f32,
+    warp_turb: f32,
+
+    level_norm: f32,
+    bg_ambient: f32,
+    bg_gate_lo: f32,
+    bg_gate_hi: f32,
+
+    profile_drift: f32,
+    profile_pulse: f32,
+    vacuum: f32,
+    vacuum_radius: f32,
+
+    ripple_age: f32,
+    ripple_amp: f32,
+    bg_outflow: f32,
+    chroma: f32,
+
+    palette_spread: f32,
+    palette_sat: f32,
+    orb_radius: f32,
+    _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var hdr_frame: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 
-fn hue_rotate(color: vec3<f32>, turns: f32) -> vec3<f32> {
-    let angle = turns * 6.2831853;
-    let k = vec3<f32>(0.57735, 0.57735, 0.57735); // rotate around the luma axis
-    let cos_a = cos(angle);
-    return color * cos_a + cross(k, color) * sin(angle) + k * dot(k, color) * (1.0 - cos_a);
+// Fully saturated hue wheel, then desaturated toward white by `s`. Kept as HSV rather
+// than as a rotation of a fixed triple because the palette needs an absolute hue the song
+// can name, not an offset from an arbitrary starting colour.
+fn hsv(h: f32, s: f32) -> vec3<f32> {
+    let p = abs(fract(vec3<f32>(h) + vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return mix(vec3<f32>(1.0), clamp(p - 1.0, vec3<f32>(0.0), vec3<f32>(1.0)), s);
 }
 
 fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
@@ -64,21 +97,24 @@ fn dither(uv: vec2<f32>) -> f32 {
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     var color = textureSample(hdr_frame, samp, uv).rgb;
 
-    // Spectral-balance palette anchor: warm for bass, mid-tone for mids, cool for treble.
-    // See DESIGN.md "Spectral balance" — this is what makes a bassy track and a trebly
-    // one read as different moods of the same visual, not just different frame content.
-    let warm = vec3<f32>(1.0, 0.35, 0.15);
-    let mid = vec3<f32>(0.4, 0.9, 0.3);
-    let cool = vec3<f32>(0.2, 0.55, 1.0);
-    let anchor = warm * u.bass_w + mid * u.mid_w + cool * u.treble_w;
+    // Two anchors a `palette_spread` apart on the hue circle: the song's primary colour
+    // and its partner. Spectral balance chooses between them, so a bassy passage and a
+    // trebly one still read as different moods — but as two colours *of this song* rather
+    // than as two points on a global wheel. See DESIGN.md "Spectral balance" for why that
+    // differentiation is needed, and "Colour comes from the song, not the clock" for why
+    // it is now scoped to the track.
+    let low = hsv(u.palette_hue, u.palette_sat);
+    let high = hsv(fract(u.palette_hue + u.palette_spread), u.palette_sat * 0.85);
+
+    // Bass sits at the primary hue, treble at the partner, mids between.
+    let tilt = clamp(u.treble_w + 0.5 * u.mid_w, 0.0, 1.0);
+    let anchor = mix(low, high, tilt);
 
     color = mix(color, color * anchor * 1.6, 0.55);
 
-    // Hue rotation is a rotation about the luma axis: it preserves length but can push
-    // individual channels negative, which the tonemapper then clamps to black. That is
-    // what produced the dark core on saturated frames, so clamp before tone mapping.
-    color = max(hue_rotate(color, u.hue_shift), vec3<f32>(0.0));
-
+    // Both anchors are non-negative, so unlike the luma-axis rotation this replaced there
+    // is nothing here that can push a channel below zero and have the tonemapper clamp it
+    // to a dark core.
     color = aces_tonemap(color * u.exposure);
     color += vec3<f32>(dither(uv));
 
