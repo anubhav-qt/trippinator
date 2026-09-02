@@ -251,6 +251,10 @@ fn fold_pos(q: vec2<f32>, order: f32, frame: f32) -> vec2<f32> {
 struct Warp {
     fold: vec2<f32>,
     drift: vec2<f32>,
+    // How much of the FOLDED sample this pixel should get, 0 at the centre and 1 out
+    // where the mandala lives. Applied by `fs_main` to the two sampled *colours*. It is
+    // deliberately not applied to the coordinates here — see the note by `dir_gate`.
+    fold_mix: f32,
 };
 
 fn warp_coord(p: vec2<f32>) -> Warp {
@@ -295,11 +299,12 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // across the entire core. The fold IS the mandala; gating it out to nothing is not a
     // fix for anything.
     //
-    // What the fold does near a bright compact source is concentrate its light into `sym`
-    // wedges. That is the intended behaviour and it reads as arms converging on the
-    // centre, given a smooth ramp and some other structure in the inner region for it to
-    // work on. It read as a single crescent welded to the orb only while the identity-hold
-    // disc below existed — see the note there for what was actually making it.
+    // This gate has two consumers and they use it very differently. The flow bend below
+    // is gated POSITIONALLY, which is safe: it is a small translation, so a partial one is
+    // a smaller translation and the sample radius barely moves. The fold is NOT gated
+    // positionally — `fs_main` fades it in by blending sampled colours instead. The note
+    // further down, where the positional blend used to be, explains why that distinction
+    // is the whole difference between a clean centre and a crescent.
     let fold_in = max(u.orb_radius, 1e-3);
     let dir_gate = smoothstep(fold_in * 1.15, fold_in * 2.60, r0);
 
@@ -410,11 +415,32 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // which are radially symmetric, so a radially symmetric injection stays radially
     // symmetric however long it accumulates. Unfolded is not the same thing as frozen,
     // and the difference matters — see the note above the return.
-    // Same gate as the flow bend: a partially applied fold is a coordinate pulled toward
-    // one direction by an amount that varies with radius, which across the orb's rim is a
-    // brightness gradient down one side. No amount of making the injection symmetric fixes
-    // that, because the asymmetry is in the sampling.
-    folded = mix(q, folded, dir_gate);
+    // THE FOLD IS NEVER BLENDED AS A POSITION. `folded` leaves this function fully
+    // folded at every radius, and `fs_main` fades it in by blending the two sampled
+    // COLOURS. That is not a stylistic preference, it is the only way to gate this
+    // particular map without manufacturing light:
+    //
+    // `fold_pos` does not rotate a coordinate, it maps EVERY angle into the single wedge
+    // [0, wedge/2]. So `folded` points in a nearly fixed direction while `q` points at
+    // the pixel's own angle, and `mix(q, folded, g)` is a blend of two vectors of equal
+    // length that disagree in direction — which is SHORTER than either. How much shorter
+    // depends on the angle between them, so it is largest for pixels lying roughly
+    // opposite the wedge, and it peaks at g = 0.5, in the middle of the ramp.
+    //
+    // A shortened sample coordinate reads the previous frame from further in than the
+    // pixel sits. In the middle of the frame "further in" is the orb's hot centre, so
+    // that one side of the ramp band spent every frame stamping a copy of the orb's core
+    // onto itself: a bright arc, in the orb's own colour, curved around the centre and
+    // on ONE side because the wedge has one direction. That was the crescent, all along.
+    //
+    // It also explains why moving the ramp never removed it. The band was pushed from
+    // 0.95x the orb radius to 1.8x, then 3x, then to a floor of 0.45 * core_radius, and
+    // the arc simply moved out with it every time, because the arc was the band.
+    //
+    // Blending the sampled colours instead has no geometry in it: each of the two
+    // coordinates keeps its own radius exactly, so neither can pull light in from a
+    // radius it does not belong to. This is the same reasoning, and the same fix, that
+    // already confines the fold at the OUTER edge of the mandala — see `fs_main`.
 
     // Tumbling anisotropy in the zoom: the image breathes as a slowly turning ellipse
     // instead of a perfect circle. `warp_shear` adds a steady stretch along the same
@@ -448,11 +474,13 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     //  2. It dims the orb by the same factor for the same reason, which is why the orb
     //     came out as a tiny hot pinprick with no visible body: of its two terms only the
     //     `pow(f, 6)` highlight survived being stripped of its trail.
-    //  3. The disc's boundary is a step in the warp's velocity field — zero inside,
-    //     differential rotation plus zoom immediately outside. The orb's halo piles up
-    //     against that step and winds along it, which is a bright arc in the orb's own
-    //     colour lying on the rim of the dark disc. That was the crescent. It was never
-    //     the fold. It was the edge of the fix.
+    //  3. Its boundary is a step in the warp's velocity field — zero inside, differential
+    //     rotation plus zoom immediately outside — which smears whatever light crosses it.
+    //
+    // The crescent was blamed on that boundary once. It was not the cause: the hold came
+    // out and the crescent stayed exactly where it was. See the note by the fold blend
+    // below for what was actually making it. Removing the hold was still right, for 1
+    // and 2, but those are the only two things it was ever responsible for.
     //
     // The orb is kept flat and radial by making the SAMPLING radially symmetric across
     // it, not by stopping the sampling. `dir_gate` above is the whole mechanism: the flow
@@ -467,7 +495,7 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     let fold_out = axis * ((transpose(axis) * folded) * aniso) * z;
     let drift_out = axis * ((transpose(axis) * q) * aniso) * drift_z;
 
-    return Warp(fold_out, drift_out);
+    return Warp(fold_out, drift_out, dir_gate);
 }
 // Four concentric wave rings sitting outside the central orb, separated from it by a
 // gap. Each ring is a closed wave function r(theta) = base + amp*sin(lobes*theta + phase),
@@ -940,9 +968,15 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // coordinates is what keeps the kaleidoscope inside the core without a seam: the fold
     // builds the mandala, and beyond it the field simply flows, so there is exactly one
     // core on screen and the background is free to carry the feeling on its own terms.
+    // Three reasons to take the unfolded sample instead of the folded one, and the
+    // strongest wins: this pixel is outside the mandala, the folded coordinate has run
+    // off the texture, or this pixel is close enough to the centre that the fold has no
+    // business there. The last of those is `w.fold_mix`, and doing it here rather than in
+    // the coordinate is what removed the crescent — see the long note by `dir_gate`.
     let folded_prev = sample_chroma(fold_s);
     let drift_prev = sample_chroma(drift_s);
-    let decayed = mix(folded_prev, drift_prev, max(outer, escaped)) * decay;
+    let unfolded = max(max(outer, escaped), 1.0 - w.fold_mix);
+    let decayed = mix(folded_prev, drift_prev, unfolded) * decay;
 
     // The mandala is evaluated in a shrunken frame, so it occupies `core_scale` of the
     // radius it used to and everything beyond it belongs to the background.
