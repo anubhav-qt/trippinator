@@ -223,13 +223,15 @@ impl Engine {
         // look the way it should: `lvl` says whether the analysis thinks the music is
         // loud for this track, and the weights say which configuration it chose.
         log::info!(
-            "{fps:.0} fps | rms {:.3} | lvl {:.2} | bass {:.3} | mid {:.3} | treble {:.3}              | grand {:.2} | pulse {:.2} drift {:.2} swarm {:.2} | onsets {:.1}/s              | organic {:.2} | core {:.2}",
+            "{fps:.0} fps | rms {:.3} | lvl {:.2} | bass {:.3} | mid {:.3} | treble {:.3}              | grand {:.2} | dyn {:.2} | vac {:.2} | pulse {:.2} drift {:.2} swarm {:.2}              | onsets {:.1}/s | organic {:.2} | core {:.2}",
             self.audio.instant.rms,
             self.audio.long_term.level_norm,
             self.audio.bands.energy[1],
             self.audio.bands.energy[3],
             self.audio.bands.energy[5],
             self.renderer.grandness(),
+            self.audio.long_term.dynamic_range,
+            self.renderer.vacuum(),
             p.pulse,
             p.drift,
             p.swarm,

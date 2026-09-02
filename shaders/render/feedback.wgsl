@@ -79,8 +79,13 @@ struct Uniforms {
 
     profile_drift: f32,
     profile_pulse: f32,
+    vacuum: f32,
+    vacuum_radius: f32,
+
+    ripple_age: f32,
+    ripple_amp: f32,
+    bg_outflow: f32,
     _pad3: f32,
-    _pad4: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -89,6 +94,10 @@ struct Uniforms {
 
 const TAU: f32 = 6.2831853;
 const PI: f32 = 3.14159265;
+
+// How fast a ripple wavefront travels outward, in frame units per second. At this rate a
+// wave launched at the centre reaches the top of a portrait frame in about two seconds.
+const RIPPLE_SPEED: f32 = 0.52;
 
 // NOTE ON UNITS: `p` is aspect-corrected, so on this portrait panel the frame is only
 // +/-0.5625 wide but +/-1.0 tall, and the corners sit at r = 1.147. Radii written as if
@@ -238,6 +247,35 @@ fn warp_coord(p: vec2<f32>) -> Warp {
        * (u.warp_turb * u.dt)
        * smoothstep(0.0, 0.35, r0);
 
+    // Ripple: a wave packet launched from the centre and travelling outward, applied as
+    // a radial velocity so it compresses the space ahead of the front and rarefies it
+    // behind. The front's radius is its age times its speed, so this is one wave moving
+    // out rather than a standing pattern that happens to oscillate — a standing one reads
+    // as the image wobbling, not as something having left the middle.
+    //
+    // Onsets launch small ones continuously, which is what makes the orb ripple; a
+    // rupture launches a large one. Both fade with the wave's own age.
+    let front = u.ripple_age * RIPPLE_SPEED;
+    let dr = r0 - front;
+    let packet = exp(-dr * dr * 70.0) * exp(-u.ripple_age * 1.1);
+    q *= clamp(1.0 + u.ripple_amp * packet * sin(dr * 24.0) * u.dt, 0.55, 1.45);
+
+    // Vacuum: the space itself recoiling away from a hole in the middle. Sampling from a
+    // *smaller* radius than the pixel sits at means the content that was there is carried
+    // outward — so the material around the hole is genuinely evacuated into a ring rather
+    // than a black disc being drawn over a structure that is still present underneath.
+    // `fs_main` does the other two halves of that: annihilating the history inside the
+    // hole, and masking injection so nothing is drawn back into it.
+    if (u.vacuum_radius > 1e-4) {
+        // Contained deliberately. The recoil dies out by ~2.4x the hole radius, so what
+        // reads is the middle being torn out and the material around it thrown clear —
+        // not the whole frame being blown outward, which is a different and much less
+        // interesting event.
+        let push = smoothstep(0.0, u.vacuum_radius * 0.55, r0)
+                 * (1.0 - smoothstep(u.vacuum_radius, u.vacuum_radius * 2.4, r0));
+        q *= 1.0 - 2.2 * u.vacuum * push * u.dt;
+    }
+
     // Uniform rotation. Zero for the transient-led archetype, which is why this did not
     // exist before; sustained material gets a slow overall turn, and dense material turns
     // the other way, so the two do not read as the same motion at different speeds.
@@ -305,9 +343,16 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // length is the pixel's own radius, so unlike the folded coordinate it never leaves
     // the frame and never has to be mirrored back in — which is what was stamping copies
     // of the core into the corners.
+    //
+    // On top of that it carries an always-outward rate of its own, so the background
+    // streams outward and fades on the way rather than sitting where it was injected and
+    // pulsing in place. It is applied here and not in `z` so the core is unaffected: the
+    // mandala can still tunnel inward while the field around it flows out.
+    let drift_z = z * exp(-u.bg_outflow * u.dt);
+
     return Warp(
         axis * ((transpose(axis) * folded) * aniso) * z,
-        axis * ((transpose(axis) * q) * aniso) * z,
+        axis * ((transpose(axis) * q) * aniso) * drift_z,
     );
 }
 
@@ -721,8 +766,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // the retention to a power shortens the half-life by that factor and stays frame-rate
     // independent, so the background reads as something passing through rather than as
     // paint building up.
+    // The extra decay out here was originally 2.5, chosen when the background had no
+    // outward motion of its own and its only alternative to accumulating into a flat wash
+    // was to be cleared quickly. Now that it flows out, it can be allowed to travel much
+    // further before it goes — the outflow is what stops the wash, so the trail no longer
+    // has to.
     let outer = smoothstep(u.core_scale * 0.85, u.core_scale * 1.30, length(p));
-    let decay = pow(u.feedback_decay, 1.0 + 2.5 * outer);
+    let decay = pow(u.feedback_decay, 1.0 + 1.15 * outer);
 
     // Blend the two feedback samples by radius. Doing this in colour rather than in
     // coordinates is what keeps the kaleidoscope inside the core without a seam: the fold
@@ -736,11 +786,27 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // radius it used to and everything beyond it belongs to the background.
     let core = p / max(u.core_scale, 0.05);
 
-    let injected = layer_orb(core)
+    var injected = layer_orb(core)
                  + layer_spectral_ring(core)
                  + layer_point_emitters(core)
                  + layer_constellation(p)
                  + layer_background(p);
 
-    return vec4<f32>(decayed + injected * u.inject_gain * u.dt, 1.0);
+    // The other two halves of the vacuum. The warp has already carried the surrounding
+    // field outward; this annihilates whatever history is left inside the hole and masks
+    // injection so nothing is drawn back into it. Painting black over the top instead
+    // would leave the orb intact underneath and still feeding the loop — the point is
+    // that for a second or so the middle of the image is not there at all.
+    //
+    // The rim is a fraction of the radius rather than a fixed width, so a small hole is
+    // as sharply defined as a large one.
+    // `vacuum_radius` is 0 on almost every frame, and a smoothstep whose two edges are
+    // equal is undefined in WGSL — so floor it, exactly as `falloff` does. At the floor
+    // the mask is 0 everywhere that matters and `u.vacuum` is 0 regardless.
+    let vr = max(u.vacuum_radius, 1e-4);
+    let void_mask = 1.0 - smoothstep(vr * 0.72, vr, length(p));
+    let keep = 1.0 - void_mask * u.vacuum;
+    injected *= keep;
+
+    return vec4<f32>(decayed * keep + injected * u.inject_gain * u.dt, 1.0);
 }

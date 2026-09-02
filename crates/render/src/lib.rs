@@ -126,8 +126,20 @@ struct Uniforms {
     /// Blend weights of the two archetypes the shader cares about, 0..1.
     profile_drift: f32,
     profile_pulse: f32,
+    /// Strength of the current vacuum event, 0..1, and the radius of the hole it has
+    /// opened, in aspect-corrected screen units. Both are 0 almost all the time.
+    vacuum: f32,
+    vacuum_radius: f32,
+
+    /// Seconds since the current ripple wavefront was launched from the centre, and the
+    /// radial displacement rate at its crest. The front's radius is `age * speed`, so
+    /// this is one travelling wave rather than a standing pattern.
+    ripple_age: f32,
+    ripple_amp: f32,
+    /// Extra always-outward radial rate applied to the background's sample coordinate
+    /// only, so the outer field streams outward and fades instead of pulsing in place.
+    bg_outflow: f32,
     _pad3: f32,
-    _pad4: f32,
 }
 
 /// Hand-tuned safe range for `organic`, both ends found by sweeping the live keys
@@ -338,8 +350,8 @@ impl ProfileParams {
         swell_weight: 1.0,
         hit_lo: 1.25,
         hit_hi: 2.0,
-        swell_lo: 0.42,
-        swell_hi: 0.80,
+        swell_lo: 0.58,
+        swell_hi: 0.88,
         grand_attack: 1.6,
         grand_release: 6.0,
         trail_mul: 2.1,
@@ -412,6 +424,98 @@ impl ProfileParams {
         self
     }
 }
+
+/// Detects a sudden change in what the music is doing — a drop, a section boundary, a
+/// hard change of texture.
+///
+/// It compares a fast reading of a five-element feature vector against a slow one and
+/// looks for the distance between them to spike. That one test covers all three of the
+/// cases worth reacting to, because each shows up as the fast vector leaving the slow one:
+/// the floor dropping out moves the level element, a bass slam moves level and balance
+/// together, and a change of instrumentation moves the balance and centroid with the level
+/// barely touched.
+///
+/// The threshold is adaptive — the track's own recent novelty statistics — which is what
+/// keeps this rare in ordinary playing without imposing a quota. There is deliberately
+/// **no limit on how often it can fire**: a track built out of drops should get a vacuum
+/// at every one of them. The only gate on repetition is hysteresis plus a short debounce,
+/// which is edge detection rather than rationing — without it a single event fires on
+/// every frame for as long as the condition holds.
+struct RuptureDetector {
+    fast: [f32; 5],
+    slow: [f32; 5],
+    novelty_ema: f32,
+    novelty_dev: f32,
+    /// False between a trigger and the novelty falling back to ordinary levels.
+    armed: bool,
+    debounce: f32,
+}
+
+impl RuptureDetector {
+    fn new() -> Self {
+        Self {
+            fast: [0.0; 5],
+            slow: [0.0; 5],
+            novelty_ema: 0.0,
+            novelty_dev: 0.0,
+            armed: true,
+            debounce: 0.0,
+        }
+    }
+
+    /// Returns 0.0 on an ordinary frame, or the event's strength (0..1) on the frame a
+    /// rupture is detected.
+    fn update(&mut self, audio: &AudioFeatures, bass_w: f32, mid_w: f32, treble_w: f32, dt: f32) -> f32 {
+        // Level is taken straight off the instantaneous RMS rather than off an envelope,
+        // because the whole point is to catch the moment the floor moves — a smoothed
+        // level cannot be sudden.
+        let level = (audio.instant.rms / audio.long_term.loudness_ref.max(1e-4)).clamp(0.0, 1.5);
+        let target = [level, bass_w, mid_w, treble_w, audio.instant.spectral_centroid];
+
+        // Level is weighted up: a change of loudness is more of an event than a change
+        // of timbre at the same loudness.
+        let weights = [1.6f32, 1.0, 1.0, 1.0, 1.0];
+
+        let mut novelty = 0.0f32;
+        for (((fast, slow), &t), &weight) in self
+            .fast
+            .iter_mut()
+            .zip(self.slow.iter_mut())
+            .zip(target.iter())
+            .zip(weights.iter())
+        {
+            *fast = ema(*fast, t, 0.30, dt);
+            *slow = ema(*slow, t, 5.0, dt);
+            let d = (*fast - *slow) * weight;
+            novelty += d * d;
+        }
+        let novelty = novelty.sqrt();
+
+        let hi = self.novelty_ema + 2.6 * self.novelty_dev + 0.06;
+        let lo = self.novelty_ema + 0.8 * self.novelty_dev;
+
+        self.debounce = (self.debounce - dt).max(0.0);
+        let mut strength = 0.0;
+        if self.armed && self.debounce <= 0.0 && novelty > hi {
+            // How far past the bar it went, so a mild section change opens a small brief
+            // hole and a real drop opens a large one.
+            strength = smoothstep(hi, hi * 2.2 + 0.10, novelty);
+            self.armed = false;
+            self.debounce = 0.35;
+        } else if !self.armed && novelty < lo {
+            self.armed = true;
+        }
+
+        // Updated after the test so a trigger does not immediately raise its own bar.
+        self.novelty_ema = ema(self.novelty_ema, novelty, 6.0, dt);
+        self.novelty_dev = ema(self.novelty_dev, (novelty - self.novelty_ema).abs(), 8.0, dt);
+
+        strength
+    }
+}
+
+/// How long a vacuum event lasts, from the hole opening to it being fully refilled.
+const VACUUM_DURATION: f32 = 1.7;
 
 /// Three phase accumulators at golden-ratio-related rates.
 ///
@@ -486,6 +590,16 @@ pub struct Renderer {
     /// Never-repeating slow phases that keep the warp from being one fixed motion even
     /// within a single archetype.
     phases: SlowPhases,
+
+    rupture: RuptureDetector,
+    /// Seconds since the last vacuum event. Starts past the end of one so nothing fires
+    /// on the first frame.
+    vac_age: f32,
+    vac_strength: f32,
+    /// Seconds since the current ripple wavefront left the centre, and the rate at its
+    /// crest. One wave at a time — see the relaunch rule in `render`.
+    ripple_age: f32,
+    ripple_amp: f32,
 
     ping: RenderTarget,
     pong: RenderTarget,
@@ -574,6 +688,11 @@ impl Renderer {
             core_scale: 0.45,
             profile: SongProfile::default(),
             phases: SlowPhases::seeded(),
+            rupture: RuptureDetector::new(),
+            vac_age: VACUUM_DURATION * 2.0,
+            vac_strength: 0.0,
+            ripple_age: 10.0,
+            ripple_amp: 0.0,
             ping,
             pong,
             ping_is_latest: true,
@@ -641,6 +760,13 @@ impl Renderer {
         self.profile
     }
 
+    /// Strength of the vacuum event currently open, 0..1, for logging/tuning. Zero
+    /// almost all the time by design.
+    pub fn vacuum(&self) -> f32 {
+        let a = (self.vac_age / VACUUM_DURATION).clamp(0.0, 1.0);
+        self.vac_strength * smoothstep(0.0, 0.10, a) * (1.0 - smoothstep(0.40, 1.0, a))
+    }
+
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
         if width == 0 || height == 0 || (width == self.width && height == self.height) {
             return;
@@ -706,14 +832,42 @@ impl Renderer {
         // than on an absolute RMS threshold. The absolute gate this replaces was the
         // other half of the failure: it was calibrated against a loud modern master, so a
         // dynamic-range-preserving older mix never cleared it however grand the passage.
-        let audible = smoothstep(0.30, 0.70, level);
+        // Calibrated to land near where the absolute gate it replaced actually sat on
+        // typical material — that gate averaged ~0.7 rather than saturating, and swapping
+        // it for one that reaches 1.0 on anything merely loud is part of why grandness
+        // rose across the board.
+        let audible = smoothstep(0.35, 0.80, level);
 
         let hit = smoothstep(cfg.hit_lo, cfg.hit_hi, ratio) * audible * cfg.hit_weight;
+
+        // Being near the ceiling only means something if the track ever leaves it. On its
+        // own that test calls a passage grand whenever the level is simply steady and up,
+        // which is the normal state of most material and the permanent state of speech —
+        // so it is multiplied by how far the level currently sits above this track's own
+        // 25-second norm. Kept as a factor between 0.55 and 1 rather than a gate, because
+        // a long sustained passage does eventually raise its own 25 s norm and should not
+        // then be demoted to ordinary.
+        let slow = audio.long_term.slow_energy.max(1e-4);
+        let elevated = 0.55 + 0.45 * smoothstep(1.05, 1.35, audio.long_term.avg_energy / slow);
+
         let swell = smoothstep(cfg.swell_lo, cfg.swell_hi, level)
             * (0.45 + 0.55 * audio.character.sustained)
+            * elevated
             * cfg.swell_weight;
 
-        let target_grand = hit.max(swell).clamp(0.0, 1.0);
+        // Nothing without dynamic range gets to be grand. A narration video, a podcast or
+        // a stream sits at one level indefinitely: it clears every ceiling-relative test
+        // there is, because its ceiling *is* its normal level. Judging the material rather
+        // than the moment is the only test that separates that case from music, and it is
+        // applied to both paths because continuous speech trips the hit path too — syllable
+        // peaks clear a 1.5x-over-context ratio easily.
+        //
+        // A factor rather than a gate, and floored at 0.12 rather than 0, so a compressed
+        // but genuinely musical track is damped instead of being switched off.
+        let range_gate =
+            0.12 + 0.88 * smoothstep(0.22, 0.50, audio.long_term.dynamic_range);
+
+        let target_grand = (hit.max(swell) * range_gate).clamp(0.0, 1.0);
         let tau = if target_grand > self.grandness_env {
             cfg.grand_attack
         } else {
@@ -779,6 +933,58 @@ impl Renderer {
         let warp_turb = (cfg.turb * (1.0 + w(1, 0.40)) * (0.6 + 0.8 * mid_raw / total) * org)
             .clamp(0.0, 4.20);
 
+        // --- Rupture: vacuum events and the ripple they launch --------------------
+        self.vac_age = (self.vac_age + dt).min(VACUUM_DURATION * 2.0);
+        // Capped rather than left to accumulate: the wave is long dead by then, and an
+        // age of a few thousand seconds puts `sin(dr * 24.0)` deep into the range where
+        // f32 has no precision left.
+        self.ripple_age = (self.ripple_age + dt).min(12.0);
+
+        let rupture = self.rupture.update(
+            audio,
+            bass_raw / total,
+            mid_raw / total,
+            treble_raw / total,
+            dt,
+        );
+        if rupture > 0.0 {
+            log::info!("rupture {:.2} — vacuum", rupture);
+            self.vac_age = 0.0;
+            self.vac_strength = 0.35 + 0.65 * rupture;
+        }
+
+        // The hole opens fast, holds, and refills. Deliberately not a decaying envelope:
+        // a void that fades back in reads as a dimmer, not as space closing.
+        let a = (self.vac_age / VACUUM_DURATION).clamp(0.0, 1.0);
+        let vacuum = self.vac_strength
+            * smoothstep(0.0, 0.10, a)
+            * (1.0 - smoothstep(0.40, 1.0, a));
+        // Sized against the live core so it always reads as "the middle of the mandala is
+        // gone" whatever the mandala has been set to, and expanding slightly while open.
+        let vacuum_radius = 0.62 * self.core_scale * vacuum * (0.80 + 0.40 * a);
+
+        // Ripples are launched from the centre by onsets, and much harder by a rupture.
+        // Only one wave travels at a time: a new launch takes over only if it would be
+        // stronger than what is already out there, so an ordinary beat cannot stomp the
+        // wave a drop just sent out.
+        let live = self.ripple_amp * (-self.ripple_age * 1.1).exp();
+        let mut launch: f32 = 0.0;
+        if audio.short_term.onset {
+            launch = 0.8 + 2.2 * audio.short_term.transient_strength;
+        }
+        if rupture > 0.0 {
+            launch = launch.max(4.0 + 4.0 * rupture);
+        }
+        if launch > live {
+            self.ripple_age = 0.0;
+            self.ripple_amp = launch;
+        }
+
+        // The outer field always drifts outward, on top of whatever the core is doing —
+        // so the background streams away and fades rather than pulsing in place. Sustained
+        // material and grand passages push it further before it goes.
+        let bg_outflow = 0.40 + 0.50 * self.profile.drift + 0.35 * self.grandness_env;
+
         let uniform_data = Uniforms {
             resolution: [self.width as f32, self.height as f32],
             time: self.time,
@@ -814,8 +1020,12 @@ impl Renderer {
             bg_gate_hi: cfg.bg_gate_hi,
             profile_drift: self.profile.drift,
             profile_pulse: self.profile.pulse,
+            vacuum,
+            vacuum_radius,
+            ripple_age: self.ripple_age,
+            ripple_amp: self.ripple_amp,
+            bg_outflow,
             _pad3: 0.0,
-            _pad4: 0.0,
         };
         self.uniforms.update(queue, &uniform_data);
 

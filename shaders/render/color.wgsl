@@ -47,8 +47,13 @@ struct Uniforms {
 
     profile_drift: f32,
     profile_pulse: f32,
+    vacuum: f32,
+    vacuum_radius: f32,
+
+    ripple_age: f32,
+    ripple_amp: f32,
+    bg_outflow: f32,
     _pad3: f32,
-    _pad4: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

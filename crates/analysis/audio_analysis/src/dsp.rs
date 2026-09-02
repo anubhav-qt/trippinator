@@ -43,7 +43,8 @@ pub struct DspEngine {
     env_mid: f32,      // ~1.5 s  — the bar
     env_slow: f32,     // ~25 s   — the section
     env_peak: f32,     // fast up, ~1 s down — the local crest
-    loudness_ref: f32, // fast up, ~60 s down — the whole track's ceiling
+    loudness_ref: f32,   // fast up, ~60 s down — the whole track's ceiling
+    loudness_floor: f32, // ~2 s down, ~90 s up — the whole track's floor
 
     // Volatility as a running mean/variance pair rather than a windowed std-dev.
     vol_mean: f32,
@@ -100,6 +101,12 @@ impl DspEngine {
             // track does not divide by an almost-zero reference and read as maximally
             // loud before the follower has seen anything.
             loudness_ref: 0.08,
+            // Starts equal to the ceiling, i.e. "no dynamic range known yet". The
+            // asymmetry matters: the floor drops in seconds, so one quiet bar is enough
+            // to establish that a track has range, while it takes a minute and a half of
+            // unbroken level to conclude that it does not. Starting it low instead would
+            // credit every source with range it has not demonstrated.
+            loudness_floor: 0.08,
             vol_mean: 0.0,
             vol_var: 0.0,
             flux_ema: 0.0,
@@ -285,9 +292,26 @@ impl DspEngine {
         .max(0.004);
 
         let level_norm = (self.env_mid / self.loudness_ref).clamp(0.0, 1.0);
-        // Headroom actually used: a dynamic master leaves its slow average well below its
-        // ceiling, a brickwalled one sits right against it.
-        let dynamic_range = (1.0 - self.env_slow / self.loudness_ref).clamp(0.0, 1.0);
+
+        // Floor follower, the mirror of the ceiling. Gated on there being something
+        // playing at all, so silence between tracks does not set the floor to zero and
+        // make everything after it look enormously dynamic.
+        if self.env_mid > 0.006 {
+            self.loudness_floor = if self.env_mid < self.loudness_floor {
+                ema(self.loudness_floor, self.env_mid, 2.0, dt)
+            } else {
+                ema(self.loudness_floor, self.env_mid, 90.0, dt)
+            };
+        }
+        self.loudness_floor = self.loudness_floor.clamp(1e-4, self.loudness_ref);
+
+        // How much range this material actually has, floor against ceiling, both on long
+        // timescales. This is the quantity that separates music from a source that is
+        // simply *on* — narration, a podcast, a stream — and it has to be measured
+        // between two long-memory followers rather than against a rolling average,
+        // because a rolling average converges to whatever is playing and so reports no
+        // range for a sustained passage and no range for continuous speech alike.
+        let dynamic_range = (1.0 - self.loudness_floor / self.loudness_ref).clamp(0.0, 1.0);
 
         // Volatility over ~4 s as a running mean/variance pair. The x5 scale is kept from
         // the windowed version it replaces so the visual side's tuning still holds.
