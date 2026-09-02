@@ -89,8 +89,44 @@ struct Uniforms {
     /// Injection is energy-per-second; the shader multiplies by `dt`.
     inject_gain: f32,
     exposure: f32,
-    _pad3: f32,
-    _pad4: f32,
+    /// Scale on every departure from rigid geometry in the feedback shader — imperfect
+    /// fold, breathing mirror order, flow-field warp, ring rotation and shape morphing,
+    /// orb churn, blob eccentricity. Arrives already mapped into `ORGANIC_MIN..MAX`.
+    organic: f32,
+    /// Radius the central mandala occupies, as a fraction of the frame. Everything
+    /// outside it is background.
+    core_scale: f32,
+}
+
+/// Hand-tuned safe range for `organic`, both ends found by sweeping the live keys
+/// against real music: below 0.10 the image is rigidly geometric, above 0.70 the fold
+/// softens enough that the structure stops holding together. The song-feel envelope
+/// moves within this range and never outside it — see DESIGN.md's safety contract.
+const ORGANIC_MIN: f32 = 0.10;
+const ORGANIC_MAX: f32 = 0.70;
+
+/// How fluid the current track feels, 0..1, from four slow quantities.
+///
+/// Everything here is chosen to describe the *material* rather than the moment: a steady
+/// bass-led drone lands near 0 and stays geometric, a bright track with real dynamics
+/// lands high and flows. Deliberately not built from `attack` or per-band energy — those
+/// move on every beat, and a looseness that flickers at beat rate would read as the image
+/// glitching rather than as the music having a character.
+fn song_feel(audio: &AudioFeatures, grandness: f32, bass_w: f32, mid_w: f32, treble_w: f32) -> f32 {
+    // Level churn over the last second or two: a drone sits near 0, a track with real
+    // dynamic range sits high.
+    let churn = audio.long_term.volatility.clamp(0.0, 1.0);
+
+    // Timbral movement — how fast the spectral centre of mass is sliding. It is a raw
+    // derivative, so it is scaled down hard and clamped before use.
+    let movement = (audio.short_term.spectral_movement.abs() * 0.35).clamp(0.0, 1.0);
+
+    // Spectral balance. Bass-dominant material wants to stay solid, bright material
+    // wants to flow; `bass_w` is subtracted rather than merely unweighted so a heavy
+    // low end actively pulls the image back toward geometry.
+    let brightness = (mid_w * 0.5 + treble_w * 1.5 - bass_w * 0.3 + 0.25).clamp(0.0, 1.0);
+
+    (churn * 0.40 + brightness * 0.35 + movement * 0.15 + grandness * 0.10).clamp(0.0, 1.0)
 }
 
 /// Same curve as WGSL/GLSL `smoothstep`.
@@ -116,6 +152,16 @@ pub struct Renderer {
     inject_gain: f32,
     /// Trail length, in seconds to fade to half brightness.
     feedback_half_life: f32,
+    /// Smoothed 0..1 "how fluid does this track feel" envelope, mapped across
+    /// `ORGANIC_MIN..ORGANIC_MAX` to drive `Uniforms::organic`. Slow on purpose — this
+    /// is meant to drift over the course of a song, not react to a beat.
+    organic_env: f32,
+    /// Manual offset on that envelope, on the live keys, so the automatic mapping can
+    /// still be nudged by hand against real music without fighting it.
+    organic_bias: f32,
+    /// Radius of the central mandala — see `Uniforms::core_scale`. On live keys because
+    /// how big it *reads* depends on the panel, and this one is judged by eye.
+    core_scale: f32,
 
     ping: RenderTarget,
     pong: RenderTarget,
@@ -195,6 +241,13 @@ impl Renderer {
             // and needs more drive than the arithmetic suggested.
             inject_gain: 3.43,
             feedback_half_life: 0.37,
+            // Starts mid-range and settles within a few seconds of audio.
+            organic_env: 0.5,
+            organic_bias: 0.0,
+            // The portrait panel is only +/-0.5625 wide in the shader's aspect-corrected
+            // space, so a core much above this reaches the side of the screen and leaves
+            // no background to see.
+            core_scale: 0.45,
             ping,
             pong,
             ping_is_latest: true,
@@ -225,6 +278,35 @@ impl Renderer {
     pub fn adjust_trail(&mut self, factor: f32) {
         self.feedback_half_life = (self.feedback_half_life * factor).clamp(0.05, 4.0);
         log::info!("trail half-life -> {:.2}s", self.feedback_half_life);
+    }
+
+    /// Nudge the song-feel envelope up or down by hand. The automatic mapping still
+    /// runs; this only shifts where a given track sits inside the tuned range.
+    pub fn adjust_organic(&mut self, delta: f32) {
+        self.organic_bias = (self.organic_bias + delta).clamp(-0.5, 0.5);
+        log::info!(
+            "organic bias -> {:+.2} (now {:.2})",
+            self.organic_bias,
+            self.organic()
+        );
+    }
+
+    /// Current `organic` value: the song-feel envelope plus the manual bias, mapped
+    /// across the tuned safe range.
+    pub fn organic(&self) -> f32 {
+        let t = (self.organic_env + self.organic_bias).clamp(0.0, 1.0);
+        ORGANIC_MIN + (ORGANIC_MAX - ORGANIC_MIN) * t
+    }
+
+    /// Grow or shrink the central mandala, leaving more or less room for the background.
+    pub fn adjust_core_scale(&mut self, factor: f32) {
+        self.core_scale = (self.core_scale * factor).clamp(0.15, 1.0);
+        log::info!("core scale -> {:.2}", self.core_scale);
+    }
+
+    /// Current mandala radius as a fraction of the frame, for logging/tuning.
+    pub fn core_scale(&self) -> f32 {
+        self.core_scale
     }
 
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
@@ -276,6 +358,19 @@ impl Renderer {
         let tau = if target_grand > self.grandness_env { 0.4 } else { 2.5 };
         self.grandness_env += (1.0 - (-dt / tau).exp()) * (target_grand - self.grandness_env);
 
+        // Song-feel envelope. Very long time constants — ~8s to settle on a new feel,
+        // ~16s to relax back — so this tracks the track, not the bar. Slower to fall so a
+        // quiet passage inside a busy song does not snap the image back to hard geometry.
+        let target_feel = song_feel(
+            audio,
+            self.grandness_env,
+            bass_raw / total,
+            mid_raw / total,
+            treble_raw / total,
+        );
+        let feel_tau = if target_feel > self.organic_env { 8.0 } else { 16.0 };
+        self.organic_env += (1.0 - (-dt / feel_tau).exp()) * (target_feel - self.organic_env);
+
         let uniform_data = Uniforms {
             resolution: [self.width as f32, self.height as f32],
             time: self.time,
@@ -299,8 +394,8 @@ impl Renderer {
             grandness: self.grandness_env,
             inject_gain: self.inject_gain,
             exposure: 1.0,
-            _pad3: 0.0,
-            _pad4: 0.0,
+            organic: self.organic(),
+            core_scale: self.core_scale,
         };
         self.uniforms.update(queue, &uniform_data);
 
@@ -455,4 +550,33 @@ fn build_pipeline(
     });
 
     (pipeline, bind_layout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{COLOR_SHADER_SRC, FEEDBACK_SHADER_SRC};
+
+    /// Parse and validate both shaders exactly as wgpu will at pipeline creation.
+    /// Without this a WGSL error only surfaces as a panic on the first rendered frame.
+    fn validate(label: &str, src: &str) {
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("{label} failed to parse:
+{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{label} failed validation: {e:?}"));
+    }
+
+    #[test]
+    fn feedback_shader_is_valid_wgsl() {
+        validate("feedback", FEEDBACK_SHADER_SRC);
+    }
+
+    #[test]
+    fn color_shader_is_valid_wgsl() {
+        validate("color", COLOR_SHADER_SRC);
+    }
 }

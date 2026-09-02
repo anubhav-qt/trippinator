@@ -32,8 +32,8 @@ struct Uniforms {
 
     inject_gain: f32,
     exposure: f32,
-    _pad3: f32,
-    _pad4: f32,
+    organic: f32,
+    core_scale: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

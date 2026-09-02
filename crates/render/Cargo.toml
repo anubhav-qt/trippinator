@@ -11,3 +11,9 @@ wgpu.workspace = true
 bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+# Same version wgpu 24 vendors, so a shader that passes here passes at pipeline
+# creation. Validating in a test means a WGSL typo fails `cargo test` instead of
+# only showing up as a panic on the visualizer's first frame.
+naga = { version = "24.0.0", features = ["wgsl-in"] }

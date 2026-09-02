@@ -156,6 +156,14 @@ impl Engine {
     }
 
     /// Nudge the kaleidoscope symmetry order.
+    pub fn adjust_organic(&mut self, delta: f32) {
+        self.renderer.adjust_organic(delta);
+    }
+
+    pub fn adjust_core_scale(&mut self, factor: f32) {
+        self.renderer.adjust_core_scale(factor);
+    }
+
     pub fn nudge_symmetry(&mut self, delta: i32) {
         let current = self.structural.symmetry as i32;
         self.structural.symmetry = (current + delta).clamp(3, 12) as u32;
@@ -211,12 +219,14 @@ impl Engine {
 
         let fps = self.frames_since_report as f32 / elapsed;
         log::info!(
-            "{fps:.0} fps | rms {:.3} | bass {:.3} | mid {:.3} | treble {:.3} | grand {:.2}",
+            "{fps:.0} fps | rms {:.3} | bass {:.3} | mid {:.3} | treble {:.3} | grand {:.2} | organic {:.2} | core {:.2}",
             self.audio.instant.rms,
             self.audio.bands.energy[1],
             self.audio.bands.energy[3],
             self.audio.bands.energy[5],
             self.renderer.grandness(),
+            self.renderer.organic(),
+            self.renderer.core_scale(),
         );
 
         self.last_report = now;
