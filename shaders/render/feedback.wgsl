@@ -265,6 +265,28 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     var q = p;
     let r0 = length(q);
 
+    // ONE GATE FOR EVERY DIRECTIONAL TERM.
+    //
+    // Enumerate what this function does to the coordinate and check each for symmetry
+    // about the origin: the ripple and the vacuum are scalar multiplies, the uniform and
+    // differential rotations are rotations about the origin, the tumbling anisotropy is an
+    // ellipse centred on the origin. None of those can make one side of the orb brighter
+    // than the other. Exactly two terms can:
+    //
+    //   * the flow bend, which is a local translation, and
+    //   * the kaleidoscope fold, which aims every sample into a single angular wedge.
+    //
+    // Both are held at exactly zero across the orb and its surround and ramp in outside
+    // it. Nothing else is gated, so the middle stays live rather than frozen.
+    //
+    // The flow bend's ramp used to be `smoothstep(0.0, 0.35, r0)` — sized against the
+    // frame, written before the orb was a consideration. At 1.5x the orb radius that is
+    // already at 20% strength, and a few percent of translation per frame is invisible in
+    // one frame and a bright displaced arc after ninety-five of them. Gate against the orb,
+    // not against the frame.
+    let fold_in = max(u.orb_radius, 1e-3);
+    let dir_gate = smoothstep(fold_in * 1.8, fold_in * 4.0, r0);
+
     // Flow-field bend. Amplitude is deliberately ~1% of the frame: at this scale it
     // reads as the image being made of moving fluid, and much larger smears the trails
     // into mush within a few frames of feedback.
@@ -277,7 +299,7 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // centre not being centred. The ramp makes the origin a fixed point of the warp.
     q += flow(q * 1.7 + vec2<f32>(u.time * 0.035, u.time * -0.028))
        * (u.warp_turb * u.dt)
-       * smoothstep(0.0, 0.35, r0);
+       * dir_gate;
 
     // Ripple: a wave packet launched from the centre and travelling outward, applied as
     // a radial velocity so it compresses the space ahead of the front and rarefies it
@@ -371,15 +393,11 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // Inside the orb the warp is now only zoom and rotation about the centre, both of
     // which are radially symmetric, so a radially symmetric injection stays radially
     // symmetric however long it accumulates.
-    // The fold begins at 2.0x the orb radius, which is exactly where the hold region
-    // below ends. The two must NOT overlap, and that is the whole point of these numbers:
-    // `fold_pos` aims every sample into a single angular wedge, so a *partially* applied
-    // fold is a coordinate pulled toward one direction by an amount that varies with
-    // radius. Across the orb's rim that is a brightness gradient down one side — a
-    // crescent, and a lit-sphere look that no amount of making the orb itself symmetric
-    // can remove, because the asymmetry is in the sampling and not in the injection.
-    let fold_in = max(u.orb_radius, 1e-3);
-    folded = mix(q, folded, smoothstep(fold_in * 2.00, fold_in * 3.20, len));
+    // Same gate as the flow bend: a partially applied fold is a coordinate pulled toward
+    // one direction by an amount that varies with radius, which across the orb's rim is a
+    // brightness gradient down one side. No amount of making the injection symmetric fixes
+    // that, because the asymmetry is in the sampling.
+    folded = mix(q, folded, dir_gate);
 
     // Tumbling anisotropy in the zoom: the image breathes as a slowly turning ellipse
     // instead of a perfect circle. `warp_shear` adds a steady stretch along the same
@@ -399,10 +417,23 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // streams outward and fades on the way rather than sitting where it was injected and
     // pulsing in place. It is applied here and not in `z` so the core is unaffected: the
     // mandala can still tunnel inward while the field around it flows out.
-    let drift_z = z * exp(-u.bg_outflow * u.dt);
+    // The zoom and the anisotropy are held at identity across the orb. Both are symmetric
+    // about the origin, so neither was ever a source of the crescent — they are held for
+    // two different reasons. The zoom, blooming outward, drains the centre faster than
+    // injection refills it and hollows the orb into a dark disc with a bright rim. The
+    // anisotropy is a 2% ellipse, invisible per frame, which over the depth of the trail
+    // makes a round dot visibly oval.
+    //
+    // Held here rather than by blending the finished coordinate back toward `p`, which is
+    // what this replaces: that also cancelled the ripple through the middle, and its own
+    // transition band left a fraction of the flow bend alive across the orb's rim.
+    let core_hold = 1.0 - smoothstep(fold_in * 1.25, fold_in * 2.20, r0);
+    let z_held = mix(z, 1.0, core_hold);
+    let aniso_held = mix(aniso, vec2<f32>(1.0), core_hold);
+    let drift_z = z_held * exp(-u.bg_outflow * u.dt * (1.0 - core_hold));
 
-    var fold_out = axis * ((transpose(axis) * folded) * aniso) * z;
-    var drift_out = axis * ((transpose(axis) * q) * aniso) * drift_z;
+    let fold_out = axis * ((transpose(axis) * folded) * aniso_held) * z_held;
+    let drift_out = axis * ((transpose(axis) * q) * aniso_held) * drift_z;
 
     // Inside the orb the warp is the IDENTITY. Not "mostly radial", not "symmetric" —
     // the pixel samples exactly itself, so that region is its own injection decayed to
@@ -417,13 +448,6 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // Consequence worth knowing: a ripple now emanates from the orb's edge rather than
     // from the exact centre, because there is no motion inside the hold region to carry
     // it.
-    // Fully identity out past the orb's rim, reaching zero exactly where the fold starts.
-    // Between the two the warp is only zoom and rotation about the centre, both radially
-    // symmetric, so there is no radius at which anything directional touches the orb.
-    let hold = 1.0 - smoothstep(fold_in * 1.25, fold_in * 2.00, r0);
-    fold_out = mix(fold_out, p, hold);
-    drift_out = mix(drift_out, p, hold);
-
     return Warp(fold_out, drift_out);
 }
 // The four concentric "wave rings" that used to live here are gone deliberately.
