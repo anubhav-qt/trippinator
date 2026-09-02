@@ -6,20 +6,8 @@ members = [
     "crates/capture/audio",
     "crates/analysis/screen_analysis",
     "crates/analysis/audio_analysis",
-    "crates/analysis/temporal",
-    "crates/dynamics/state",
-    "crates/dynamics/graph",
-    "crates/dynamics/coupling",
     "crates/renderer/gpu",
-    "crates/renderer/pipelines",
-    "crates/renderer/resources",
-    "crates/renderer/compositor",
-    "crates/systems/waves",
-    "crates/systems/particles",
-    "crates/systems/fields",
-    "crates/systems/fractals",
-    "crates/systems/reaction_diffusion",
-    "crates/systems/feedback",
+    "crates/render",
 ]
 
 [workspace.package]
@@ -27,13 +15,12 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Anubhav"]
 license = "MIT"
-description = "A real-time generative audiovisual organism that perceives your desktop and evolves on a secondary display"
+description = "Audio + desktop reactive visualizer for a secondary portrait display"
 
 [workspace.dependencies]
 # GPU
 wgpu = "24"
 bytemuck = { version = "1", features = ["derive"] }
-naga = "24"
 
 # Windowing
 winit = "0.30"
@@ -61,7 +48,6 @@ windows = { version = "0.58", features = [
 
 # Math
 glam = { version = "0.29", features = ["bytemuck"] }
-nalgebra = "0.33"
 
 # Utilities
 pollster = "0.4"

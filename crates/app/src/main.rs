@@ -1,8 +1,6 @@
 //! # Trippinator
 //!
-//! A real-time generative audiovisual organism.
-//!
-//! Input does not control the image. Input perturbs a system that controls itself.
+//! An audio- and desktop-reactive visualizer for a secondary portrait display.
 
 mod engine;
 mod monitor;
@@ -122,7 +120,15 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                use winit::event::ElementState;
                 use winit::keyboard::{Key, NamedKey};
+
+                // Fire on press only — KeyboardInput also fires on release, and
+                // handlers below are not idempotent (fullscreen toggle, mode cycling).
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+
                 if event.logical_key == Key::Named(NamedKey::Escape) {
                     info!("Escape pressed — exiting");
                     event_loop.exit();
@@ -132,6 +138,20 @@ impl ApplicationHandler for App {
                             window.set_fullscreen(None);
                         } else {
                             window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                        }
+                    }
+                } else if let Key::Character(s) = &event.logical_key {
+                    // Live tuning controls — see DESIGN.md.
+                    // Symmetry: [ / ]. Brightness: - / =. Trail length: , / .
+                    if let Some(engine) = &mut self.engine {
+                        match s.as_str() {
+                            "[" => engine.nudge_symmetry(-1),
+                            "]" => engine.nudge_symmetry(1),
+                            "-" => engine.adjust_inject_gain(1.0 / 1.15),
+                            "=" | "+" => engine.adjust_inject_gain(1.15),
+                            "," | "<" => engine.adjust_trail(1.0 / 1.2),
+                            "." | ">" => engine.adjust_trail(1.2),
+                            _ => {}
                         }
                     }
                 }
@@ -145,18 +165,26 @@ impl ApplicationHandler for App {
                 if let Some(engine) = &mut self.engine {
                     match engine.render() {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                            if let Some(window) = &self.window {
-                                let size = window.inner_size();
-                                engine.resize(size.width, size.height);
-                            }
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            log::error!("Out of GPU memory — exiting");
-                            event_loop.exit();
-                        }
                         Err(e) => {
-                            log::warn!("Render error (continuing): {e}");
+                            if let Some(surf_err) = e.downcast_ref::<wgpu::SurfaceError>() {
+                                match surf_err {
+                                    wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated => {
+                                        if let Some(window) = &self.window {
+                                            let size = window.inner_size();
+                                            engine.resize(size.width, size.height);
+                                        }
+                                    }
+                                    wgpu::SurfaceError::OutOfMemory => {
+                                        log::error!("Out of GPU memory — exiting");
+                                        event_loop.exit();
+                                    }
+                                    _ => {
+                                        log::warn!("Surface render error: {surf_err}");
+                                    }
+                                }
+                            } else {
+                                log::warn!("Render error (continuing): {e}");
+                            }
                         }
                     }
                 }
@@ -172,10 +200,7 @@ impl ApplicationHandler for App {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    info!("╔══════════════════════════════════════════════╗");
-    info!("║         TRIPPINATOR — Starting Up            ║");
-    info!("║  Input perturbs a system that controls itself ║");
-    info!("╚══════════════════════════════════════════════╝");
+    info!("trippinator starting");
 
     let event_loop = EventLoop::new()?;
     let mut app = App::new();

@@ -1,8 +1,0 @@
-[package]
-name = "trippinator-analysis-temporal"
-version.workspace = true
-edition.workspace = true
-description = "Temporal analysis — smoothing, trend detection, and multi-timescale integration"
-
-[dependencies]
-log.workspace = true

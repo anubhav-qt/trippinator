@@ -2246,13 +2246,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trippinator-analysis-temporal"
-version = "0.1.0"
-dependencies = [
- "log",
-]
-
-[[package]]
 name = "trippinator-app"
 version = "0.1.0"
 dependencies = [
@@ -2263,23 +2256,9 @@ dependencies = [
  "log",
  "pollster",
  "trippinator-analysis-audio",
- "trippinator-analysis-screen",
- "trippinator-analysis-temporal",
  "trippinator-capture-audio",
- "trippinator-capture-screen",
- "trippinator-dynamics-coupling",
- "trippinator-dynamics-graph",
- "trippinator-dynamics-state",
- "trippinator-renderer-compositor",
+ "trippinator-render",
  "trippinator-renderer-gpu",
- "trippinator-renderer-pipelines",
- "trippinator-renderer-resources",
- "trippinator-systems-feedback",
- "trippinator-systems-fields",
- "trippinator-systems-fractals",
- "trippinator-systems-particles",
- "trippinator-systems-reaction-diffusion",
- "trippinator-systems-waves",
  "wgpu",
  "winit",
 ]
@@ -2308,37 +2287,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "trippinator-dynamics-coupling"
+name = "trippinator-render"
 version = "0.1.0"
 dependencies = [
- "log",
- "trippinator-dynamics-state",
-]
-
-[[package]]
-name = "trippinator-dynamics-graph"
-version = "0.1.0"
-dependencies = [
- "log",
- "trippinator-dynamics-state",
-]
-
-[[package]]
-name = "trippinator-dynamics-state"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "log",
-]
-
-[[package]]
-name = "trippinator-renderer-compositor"
-version = "0.1.0"
-dependencies = [
+ "anyhow",
  "bytemuck",
  "log",
- "trippinator-dynamics-state",
+ "trippinator-analysis-audio",
  "trippinator-renderer-gpu",
  "wgpu",
 ]
@@ -2350,96 +2305,6 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "log",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-renderer-pipelines"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-renderer-resources"
-version = "0.1.0"
-dependencies = [
- "log",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-feedback"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "log",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-fields"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "log",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-fractals"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "log",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-particles"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "log",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-reaction-diffusion"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "log",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
- "wgpu",
-]
-
-[[package]]
-name = "trippinator-systems-waves"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "glam",
- "log",
- "trippinator-analysis-audio",
- "trippinator-dynamics-state",
- "trippinator-renderer-gpu",
  "wgpu",
 ]
 

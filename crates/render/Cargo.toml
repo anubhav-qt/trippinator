@@ -1,0 +1,13 @@
+[package]
+name = "trippinator-render"
+version.workspace = true
+edition.workspace = true
+description = "Feedback render pipeline — inject+warp, then color, into ping-pong HDR targets"
+
+[dependencies]
+trippinator-renderer-gpu = { path = "../renderer/gpu" }
+trippinator-analysis-audio = { path = "../analysis/audio_analysis" }
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+anyhow.workspace = true

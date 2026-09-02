@@ -1,9 +1,0 @@
-[package]
-name = "trippinator-dynamics-coupling"
-version.workspace = true
-edition.workspace = true
-description = "Coupling functions — opposing behaviors and response curves"
-
-[dependencies]
-trippinator-dynamics-state = { path = "../state" }
-log.workspace = true

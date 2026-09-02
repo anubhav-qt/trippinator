@@ -1,9 +1,0 @@
-[package]
-name = "trippinator-dynamics-graph"
-version.workspace = true
-edition.workspace = true
-description = "System graph — nodes, connections, and weights between visual systems"
-
-[dependencies]
-trippinator-dynamics-state = { path = "../state" }
-log.workspace = true
