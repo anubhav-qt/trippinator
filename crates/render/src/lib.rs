@@ -77,7 +77,9 @@ struct Uniforms {
     _pad2: u32,
 
     // Hand-tuned safe-range constants (Phase 1: static; Phase 2: slow drift).
-    zoom: f32,
+    /// Log-zoom rate in units per second. Positive pulls the image inward (tunnel),
+    /// negative lets it bloom outward. See `WarpCharacter`.
+    warp_radial: f32,
     /// Per-frame retention, derived from a half-life and `dt` — NOT a fixed constant.
     /// A fixed per-frame value makes brightness depend on frame rate and drives the
     /// loop to `inject / (1 - decay)`, which saturates the tonemapper to white.
@@ -96,6 +98,36 @@ struct Uniforms {
     /// Radius the central mandala occupies, as a fraction of the frame. Everything
     /// outside it is background.
     core_scale: f32,
+
+    // --- Warp character. Every one is a RATE, in units per second, and the shader
+    // multiplies by `dt`. The values these replaced were per-frame constants, which made
+    // the speed of every motion in the image a function of the frame rate.
+    /// Uniform rotation, radians/second.
+    warp_rotate: f32,
+    /// Differential rotation, radians/second per unit radius — what turns concentric
+    /// trails into spiral arms. Signed.
+    warp_spiral: f32,
+    /// Anisotropic stretch rate along a slowly turning axis, per second. Signed.
+    warp_shear: f32,
+    /// Flow-field advection amount, frame-widths per second.
+    warp_turb: f32,
+
+    /// Current level as a fraction of this track's own loudness ceiling (0..1).
+    /// Everything that used to key off raw `rms` uses this instead, so a quiet master
+    /// reaches the same visual range as a loud one.
+    level_norm: f32,
+    /// Base brightness of the always-on ambient background tier.
+    bg_ambient: f32,
+    /// Grandness at which the grand background tier starts to open.
+    bg_gate_lo: f32,
+    /// Grandness at which it is fully open.
+    bg_gate_hi: f32,
+
+    /// Blend weights of the two archetypes the shader cares about, 0..1.
+    profile_drift: f32,
+    profile_pulse: f32,
+    _pad3: f32,
+    _pad4: f32,
 }
 
 /// Hand-tuned safe range for `organic`, both ends found by sweeping the live keys
@@ -135,6 +167,291 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Frame-rate-independent exponential move toward a target.
+fn ema(cur: f32, target: f32, tau: f32, dt: f32) -> f32 {
+    cur + (1.0 - (-dt / tau.max(1e-4)).exp()) * (target - cur)
+}
+
+/// How much of each archetype this track is, summing to 1.
+///
+/// Not a mode switch. Everything downstream is a linear blend of the three parameter
+/// sets by these weights, so a track that is half riff and half held chord gets a
+/// configuration halfway between — and a track that changes character mid-song crosses
+/// over smoothly rather than snapping.
+#[derive(Debug, Clone, Copy)]
+pub struct SongProfile {
+    /// Transient-led. Drums, riffs, plucked strings — energy arrives in hits.
+    pub pulse: f32,
+    /// Sustain-led. Held tones, bowed and blown instruments, pads, a guitar lead over a
+    /// long chord. Energy arrives as a swell and stays.
+    pub drift: f32,
+    /// Dense and busy: full spectrum, loud, lots of everything at once.
+    pub swarm: f32,
+}
+
+impl Default for SongProfile {
+    fn default() -> Self {
+        Self { pulse: 0.34, drift: 0.33, swarm: 0.33 }
+    }
+}
+
+impl SongProfile {
+    /// Classify from the slow character features. Deliberately built only out of
+    /// quantities with time constants in the tens of seconds — this decides which
+    /// configuration the visual runs, and a classification that moved on a beat would
+    /// read as the whole look glitching rather than as the music having a character.
+    fn from_audio(audio: &AudioFeatures) -> Self {
+        let c = &audio.character;
+        let level = audio.long_term.level_norm;
+
+        let pulse = c.percussive * (1.0 - 0.5 * c.sustained);
+        // Bright, sustained material scores highest — a held guitar lead or a pad, as
+        // opposed to a sustained bass drone, which should stay solid.
+        let drift = c.sustained * (0.35 + 0.65 * (c.mid_w + c.treble_w)) * (1.0 - 0.4 * c.density);
+        let swarm = c.density * (0.35 + 0.65 * c.percussive) * smoothstep(0.35, 0.75, level);
+
+        // A floor on each keeps every blend weight differentiable and stops a silent or
+        // ambiguous passage from dividing by ~0 and snapping to whichever score is
+        // marginally largest.
+        let (pulse, drift, swarm) = (pulse + 0.06, drift + 0.06, swarm + 0.06);
+        let total = pulse + drift + swarm;
+        Self { pulse: pulse / total, drift: drift / total, swarm: swarm / total }
+    }
+
+    fn lerp(&mut self, target: &SongProfile, tau: f32, dt: f32) {
+        self.pulse = ema(self.pulse, target.pulse, tau, dt);
+        self.drift = ema(self.drift, target.drift, tau, dt);
+        self.swarm = ema(self.swarm, target.swarm, tau, dt);
+    }
+
+    /// Blend the three parameter sets by these weights.
+    fn params(&self) -> ProfileParams {
+        let mut out = ProfileParams::ZERO;
+        for (w, p) in [
+            (self.pulse, ProfileParams::PULSE),
+            (self.drift, ProfileParams::DRIFT),
+            (self.swarm, ProfileParams::SWARM),
+        ] {
+            out = out.add_scaled(&p, w);
+        }
+        out
+    }
+}
+
+/// One archetype's configuration. Three of these are blended per frame.
+///
+/// This struct is the answer to "different kinds of songs need different settings":
+/// rather than one global tuning that has to work for everything and therefore suits the
+/// track it was tuned against, each archetype carries its own grandness detector, its own
+/// trail length, and its own warp character.
+#[derive(Debug, Clone, Copy)]
+struct ProfileParams {
+    /// How much each grandness path counts for this archetype.
+    hit_weight: f32,
+    swell_weight: f32,
+    /// Hit path: energy against its own ~1.5 s context, as a ratio.
+    hit_lo: f32,
+    hit_hi: f32,
+    /// Swell path: level against this track's own 60 s loudness ceiling.
+    swell_lo: f32,
+    swell_hi: f32,
+    /// Envelope shape of the grandness reading itself.
+    grand_attack: f32,
+    grand_release: f32,
+
+    /// Multipliers on the hand-tuned globals.
+    trail_mul: f32,
+    inject_mul: f32,
+
+    /// Background: always-on ambient level, and where the grand tier opens.
+    bg_ambient: f32,
+    bg_gate_lo: f32,
+    bg_gate_hi: f32,
+
+    /// Warp character, all rates per second. See `Uniforms`.
+    radial: f32,
+    rotate: f32,
+    spiral: f32,
+    shear: f32,
+    turb: f32,
+    /// How hard a grand moment pushes the zoom outward, in log-units per second.
+    grand_bloom: f32,
+    /// How hard a transient pushes it outward.
+    pulse_kick: f32,
+}
+
+impl ProfileParams {
+    const ZERO: Self = Self {
+        hit_weight: 0.0, swell_weight: 0.0, hit_lo: 0.0, hit_hi: 0.0,
+        swell_lo: 0.0, swell_hi: 0.0, grand_attack: 0.0, grand_release: 0.0,
+        trail_mul: 0.0, inject_mul: 0.0, bg_ambient: 0.0, bg_gate_lo: 0.0,
+        bg_gate_hi: 0.0, radial: 0.0, rotate: 0.0, spiral: 0.0, shear: 0.0,
+        turb: 0.0, grand_bloom: 0.0, pulse_kick: 0.0,
+    };
+
+    /// Transient-led music. This one reproduces the look that was already tuned by ear
+    /// and liked — the warp rates are the old per-frame constants multiplied by the
+    /// ~178 fps they were tuned at, so at that frame rate the image is unchanged and at
+    /// any other frame rate it is now correct rather than merely different.
+    const PULSE: Self = Self {
+        hit_weight: 1.0,
+        swell_weight: 0.35,
+        hit_lo: 1.5,
+        hit_hi: 2.8,
+        swell_lo: 0.72,
+        swell_hi: 0.95,
+        grand_attack: 0.4,
+        grand_release: 2.5,
+        trail_mul: 1.0,
+        inject_mul: 1.0,
+        bg_ambient: 0.035,
+        bg_gate_lo: 0.04,
+        bg_gate_hi: 0.18,
+        radial: 1.42,
+        rotate: 0.0,
+        spiral: 1.78,
+        shear: 0.0,
+        turb: 1.96,
+        // The old warp blew the zoom outward by `1 - 0.045 * grandness` per frame, which
+        // at 178 fps is this rate. It was safe only because grandness never got far off
+        // the floor; now that a sustained passage can hold it near the top, the clamp on
+        // the combined rate is what keeps it safe rather than the detector's timidity.
+        grand_bloom: 8.0,
+        pulse_kick: 0.9,
+    };
+
+    /// Sustain-led music — the case that was failing. Everything here is the opposite of
+    /// the percussive tuning, and each difference is answering a specific way the old
+    /// single configuration mis-read this material:
+    ///
+    /// - grandness comes almost entirely from the swell path, because sustained music
+    ///   never produces the spike-over-recent-baseline the hit path looks for;
+    /// - the envelope is slow in both directions, so a two-minute solo reads as one long
+    ///   grand passage instead of flickering;
+    /// - the ambient background sits far higher, because this is the material where the
+    ///   room around the mandala is doing most of the work;
+    /// - the warp blooms outward rather than tunnelling inward, turns slowly, and is
+    ///   mostly flow rather than spiral — sustained sound should look like weather, not
+    ///   like a drill.
+    const DRIFT: Self = Self {
+        hit_weight: 0.25,
+        swell_weight: 1.0,
+        hit_lo: 1.25,
+        hit_hi: 2.0,
+        swell_lo: 0.42,
+        swell_hi: 0.80,
+        grand_attack: 1.6,
+        grand_release: 6.0,
+        trail_mul: 2.1,
+        inject_mul: 1.15,
+        bg_ambient: 0.115,
+        bg_gate_lo: 0.02,
+        bg_gate_hi: 0.11,
+        // Negative: a slow outward bloom rather than a tunnel inward. Sized so light
+        // injected at the centre takes about four seconds to reach the edge — fast
+        // enough to read as movement, slow enough for the trail to build behind it.
+        radial: -0.30,
+        rotate: 0.34,
+        spiral: 0.55,
+        shear: 0.34,
+        turb: 3.2,
+        // Small on purpose, and the one number here that is not simply "the opposite of
+        // PULSE": this profile can hold grandness near the top for minutes at a time, and
+        // a bloom sized for a two-second transient would empty the frame and keep it
+        // empty for the whole solo.
+        grand_bloom: 0.35,
+        pulse_kick: 0.15,
+    };
+
+    /// Dense, loud, everything at once. Fast and tight, so the image does not turn to
+    /// soup under material that is already saturating every band.
+    const SWARM: Self = Self {
+        hit_weight: 0.8,
+        swell_weight: 0.7,
+        hit_lo: 1.35,
+        hit_hi: 2.4,
+        swell_lo: 0.62,
+        swell_hi: 0.92,
+        grand_attack: 0.7,
+        grand_release: 3.5,
+        trail_mul: 0.8,
+        inject_mul: 0.88,
+        bg_ambient: 0.06,
+        bg_gate_lo: 0.05,
+        bg_gate_hi: 0.20,
+        radial: 1.95,
+        rotate: -0.48,
+        spiral: 2.6,
+        shear: 0.18,
+        turb: 2.6,
+        grand_bloom: 5.0,
+        pulse_kick: 0.6,
+    };
+
+    fn add_scaled(mut self, o: &Self, w: f32) -> Self {
+        self.hit_weight += o.hit_weight * w;
+        self.swell_weight += o.swell_weight * w;
+        self.hit_lo += o.hit_lo * w;
+        self.hit_hi += o.hit_hi * w;
+        self.swell_lo += o.swell_lo * w;
+        self.swell_hi += o.swell_hi * w;
+        self.grand_attack += o.grand_attack * w;
+        self.grand_release += o.grand_release * w;
+        self.trail_mul += o.trail_mul * w;
+        self.inject_mul += o.inject_mul * w;
+        self.bg_ambient += o.bg_ambient * w;
+        self.bg_gate_lo += o.bg_gate_lo * w;
+        self.bg_gate_hi += o.bg_gate_hi * w;
+        self.radial += o.radial * w;
+        self.rotate += o.rotate * w;
+        self.spiral += o.spiral * w;
+        self.shear += o.shear * w;
+        self.turb += o.turb * w;
+        self.grand_bloom += o.grand_bloom * w;
+        self.pulse_kick += o.pulse_kick * w;
+        self
+    }
+}
+
+/// Three phase accumulators at golden-ratio-related rates.
+///
+/// DESIGN.md's "slow layer": the combined signal has an infinite period, so the warp
+/// never returns to a state it has been in, while staying perfectly smooth. Seeded from
+/// OS entropy at startup, which is what makes two runs of the same track diverge — with
+/// identical phases the profile alone would give the same song the same motion forever.
+#[derive(Debug, Clone, Copy)]
+struct SlowPhases {
+    theta: [f32; 3],
+}
+
+impl SlowPhases {
+    const PHI: f32 = 1.618_034;
+
+    fn seeded() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState is seeded from OS entropy per process, so this gives a different
+        // starting point every run without pulling in an RNG crate.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(0x5eed);
+        let a = h.finish();
+        let f = |shift: u32| ((a >> shift) & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+        Self { theta: [f(0), f(16), f(32)] }
+    }
+
+    /// Advance. `rate` is the base angular rate; the three phases run at rate, rate*phi,
+    /// and rate*phi^2, whose ratios are irrational, so the sum never repeats.
+    fn advance(&mut self, dt: f32, rate: f32) {
+        let w = [rate, rate * Self::PHI, rate * Self::PHI * Self::PHI];
+        for (theta, w) in self.theta.iter_mut().zip(w) {
+            *theta = (*theta + dt * w) % std::f32::consts::TAU;
+        }
+    }
+
+    fn sin(&self, i: usize) -> f32 {
+        self.theta[i].sin()
+    }
+}
+
 /// Owns the ping-pong HDR targets and the two render pipelines.
 pub struct Renderer {
     width: u32,
@@ -162,6 +479,13 @@ pub struct Renderer {
     /// Radius of the central mandala — see `Uniforms::core_scale`. On live keys because
     /// how big it *reads* depends on the panel, and this one is judged by eye.
     core_scale: f32,
+
+    /// Smoothed archetype weights. ~12 s to cross over, so a track that changes
+    /// character mid-song moves between configurations over a phrase, not a bar.
+    profile: SongProfile,
+    /// Never-repeating slow phases that keep the warp from being one fixed motion even
+    /// within a single archetype.
+    phases: SlowPhases,
 
     ping: RenderTarget,
     pong: RenderTarget,
@@ -248,6 +572,8 @@ impl Renderer {
             // space, so a core much above this reaches the side of the screen and leaves
             // no background to see.
             core_scale: 0.45,
+            profile: SongProfile::default(),
+            phases: SlowPhases::seeded(),
             ping,
             pong,
             ping_is_latest: true,
@@ -309,6 +635,12 @@ impl Renderer {
         self.core_scale
     }
 
+    /// Which configuration the visual is currently running, for logging/tuning. This is
+    /// the first thing to look at when a track does not look the way it should.
+    pub fn profile(&self) -> SongProfile {
+        self.profile
+    }
+
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
         if width == 0 || height == 0 || (width == self.width && height == self.height) {
             return;
@@ -344,19 +676,50 @@ impl Renderer {
         let mut band_energy = [0.0f32; 8];
         band_energy[..7].copy_from_slice(bands);
 
-        // Frame-rate-independent trail retention. Over `feedback_half_life` seconds the
-        // image fades to half, whether we are running at 60 or 178 fps.
-        let feedback_decay = (-dt * std::f32::consts::LN_2 / self.feedback_half_life).exp();
+        // Which kind of track is this? Everything below reads its constants out of the
+        // blended archetype rather than from one global tuning.
+        self.profile.lerp(&SongProfile::from_audio(audio), 12.0, dt);
+        let cfg = self.profile.params();
 
-        // "Grand moment" detection: loud *relative to this track's own recent baseline*,
-        // and loud in absolute terms. Both gates matter — the ratio alone fires on every
-        // note in a quiet passage, the absolute level alone fires on all of a loud track.
+        let level = audio.long_term.level_norm;
+
+        // "Grand moment" detection, by two paths that answer the question differently,
+        // because two kinds of music make a big moment in incompatible ways.
+        //
+        // The HIT path is the original: loud relative to this track's own recent context.
+        // It is the right question for transient-led music, where a chorus arrives as a
+        // step change against the verse.
+        //
+        // The SWELL path is new, and is what was missing. Sustained music raises its own
+        // recent baseline as it swells, so by the time a held passage is at full height
+        // the ratio the hit path measures has already collapsed back to ~1 and the whole
+        // moment reads as ordinary. Measuring against the track's 60 s loudness ceiling
+        // instead asks "are we near the top of what this track ever does, and staying
+        // there" — which a two-minute guitar lead answers yes to for its whole length.
+        //
+        // Combined with `max` rather than a sum: they are two readings of one thing, and
+        // adding them double-counts a track that happens to satisfy both.
         let baseline = audio.long_term.avg_energy.max(1e-3);
         let ratio = audio.instant.rms / baseline;
-        let target_grand =
-            smoothstep(1.5, 2.8, ratio) * smoothstep(0.04, 0.12, audio.instant.rms);
-        let tau = if target_grand > self.grandness_env { 0.4 } else { 2.5 };
-        self.grandness_env += (1.0 - (-dt / tau).exp()) * (target_grand - self.grandness_env);
+
+        // Both paths are gated on level *normalized by this track's own ceiling* rather
+        // than on an absolute RMS threshold. The absolute gate this replaces was the
+        // other half of the failure: it was calibrated against a loud modern master, so a
+        // dynamic-range-preserving older mix never cleared it however grand the passage.
+        let audible = smoothstep(0.30, 0.70, level);
+
+        let hit = smoothstep(cfg.hit_lo, cfg.hit_hi, ratio) * audible * cfg.hit_weight;
+        let swell = smoothstep(cfg.swell_lo, cfg.swell_hi, level)
+            * (0.45 + 0.55 * audio.character.sustained)
+            * cfg.swell_weight;
+
+        let target_grand = hit.max(swell).clamp(0.0, 1.0);
+        let tau = if target_grand > self.grandness_env {
+            cfg.grand_attack
+        } else {
+            cfg.grand_release
+        };
+        self.grandness_env = ema(self.grandness_env, target_grand, tau, dt);
 
         // Song-feel envelope. Very long time constants — ~8s to settle on a new feel,
         // ~16s to relax back — so this tracks the track, not the bar. Slower to fall so a
@@ -370,6 +733,51 @@ impl Renderer {
         );
         let feel_tau = if target_feel > self.organic_env { 8.0 } else { 16.0 };
         self.organic_env += (1.0 - (-dt / feel_tau).exp()) * (target_feel - self.organic_env);
+
+        // Frame-rate-independent trail retention. Over `feedback_half_life` seconds the
+        // image fades to half, whether we are running at 60 or 178 fps. The archetype
+        // scales it: sustained material wants a long smear, dense material wants the
+        // image cleared out before the next bar arrives.
+        let half_life = (self.feedback_half_life * cfg.trail_mul).clamp(0.05, 6.0);
+        let feedback_decay = (-dt * std::f32::consts::LN_2 / half_life).exp();
+
+        // Warp character. This is the answer to "it is just one motion every time": the
+        // rates below used to be six hard-coded constants, so every track on every run
+        // got the same inward spiral and only its amplitude changed. Now the archetype
+        // sets the *kind* of motion, the slow phases wander it inside a bounded range,
+        // and the phases are entropy-seeded, so the same song twice is not the same
+        // motion twice either.
+        //
+        // Everything is clamped, per DESIGN.md's safety contract: the wandering may
+        // modulate a rate inside a hand-checked range but never set one.
+        self.phases.advance(dt, 0.021);
+        let org = self.organic();
+        // Scaled by `organic` so the wander is seasoning on the archetype rather than a
+        // second, competing source of motion — see the organic range note above.
+        let w = |i: usize, amount: f32| self.phases.sin(i) * amount * org;
+
+        let bloom = cfg.grand_bloom * self.grandness_env;
+        let kick = cfg.pulse_kick * audio.short_term.attack.min(1.5);
+        // Positive radial is a tunnel inward; grandness and transients push outward. The
+        // floor is the real safety limit here: an outward rate of 0.95/s empties the frame
+        // from centre to edge in about 2.5 s, and anything faster, held, outruns injection
+        // and leaves the image blank. The old code never discovered that only because its
+        // grandness never rose far enough to ask the question.
+        let warp_radial = (cfg.radial * (1.0 + w(0, 0.45)) - bloom - kick).clamp(-0.95, 2.80);
+        // Never fully dies with `organic` at its floor — a uniform turn is a character of
+        // the motion, not a departure from geometry.
+        let warp_rotate = (cfg.rotate * (0.4 + 0.6 * org) + w(1, 0.28)).clamp(-1.20, 1.20);
+        // The `organic` and grandness factors here were applied inside the shader before
+        // the rates moved to the CPU; they are kept so PULSE reproduces the tuned look.
+        let warp_spiral = (cfg.spiral
+            * (1.0 + w(2, 0.55))
+            * (0.6 + 0.8 * treble_raw / total)
+            * org
+            * (0.5 + self.grandness_env))
+            .clamp(-3.50, 3.50);
+        let warp_shear = (cfg.shear * org + w(0, 0.22) * 0.5).clamp(-0.80, 0.80);
+        let warp_turb = (cfg.turb * (1.0 + w(1, 0.40)) * (0.6 + 0.8 * mid_raw / total) * org)
+            .clamp(0.0, 4.20);
 
         let uniform_data = Uniforms {
             resolution: [self.width as f32, self.height as f32],
@@ -388,14 +796,26 @@ impl Renderer {
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
-            zoom: 1.008,
+            warp_radial,
             feedback_decay,
             hue_shift: self.hue_shift,
             grandness: self.grandness_env,
-            inject_gain: self.inject_gain,
+            inject_gain: self.inject_gain * cfg.inject_mul,
             exposure: 1.0,
-            organic: self.organic(),
+            organic: org,
             core_scale: self.core_scale,
+            warp_rotate,
+            warp_spiral,
+            warp_shear,
+            warp_turb,
+            level_norm: level,
+            bg_ambient: cfg.bg_ambient,
+            bg_gate_lo: cfg.bg_gate_lo,
+            bg_gate_hi: cfg.bg_gate_hi,
+            profile_drift: self.profile.drift,
+            profile_pulse: self.profile.pulse,
+            _pad3: 0.0,
+            _pad4: 0.0,
         };
         self.uniforms.update(queue, &uniform_data);
 
@@ -578,5 +998,65 @@ mod tests {
     #[test]
     fn color_shader_is_valid_wgsl() {
         validate("color", COLOR_SHADER_SRC);
+    }
+
+    /// The `name: type` pairs of the `Uniforms` struct in a shader source, in order,
+    /// with comments and blank lines stripped.
+    fn uniform_fields(src: &str) -> Vec<(String, String)> {
+        let start = src.find("struct Uniforms {").expect("no Uniforms struct");
+        let rest = &src[start..];
+        let end = rest.find("};").expect("unterminated Uniforms struct");
+        rest[..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim())
+            .filter_map(|l| l.split_once(':'))
+            .map(|(n, t)| {
+                (
+                    n.trim().to_string(),
+                    t.trim().trim_end_matches(',').trim().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Count 4-byte slots in a list of WGSL fields.
+    fn wgsl_slots(fields: &[(String, String)]) -> usize {
+        fields
+            .iter()
+            .map(|(_, ty)| {
+                let ty = ty.as_str();
+                if ty.starts_with("array<vec4<f32>, 2>") {
+                    8
+                } else if ty.starts_with("vec4") {
+                    4
+                } else if ty.starts_with("vec2") {
+                    2
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
+    /// The uniform layout is written out three times — once in Rust and once in each
+    /// shader — and nothing in the type system relates them. Getting them out of step
+    /// does not fail to compile or fail validation; it silently feeds every field after
+    /// the divergence the wrong value, which is close to impossible to recognize by
+    /// looking at the output. So check it here instead.
+    #[test]
+    fn uniform_layout_matches_between_rust_and_wgsl() {
+        let feedback = uniform_fields(FEEDBACK_SHADER_SRC);
+        let color = uniform_fields(COLOR_SHADER_SRC);
+        assert_eq!(
+            feedback, color,
+            "the two shaders declare different Uniforms blocks"
+        );
+
+        let rust_slots = std::mem::size_of::<super::Uniforms>() / 4;
+        assert_eq!(
+            wgsl_slots(&feedback),
+            rust_slots,
+            "WGSL Uniforms has a different number of 4-byte slots than the Rust struct"
+        );
     }
 }

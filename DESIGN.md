@@ -243,6 +243,49 @@ answers "kind," spectral balance answers "genre." Both are needed — a dubstep 
 piano ballad should not just be different *frames* of the same look, they should read as
 different *moods* of it.
 
+## Song archetypes (configuration, not just modulation) `[DONE]`
+
+Spectral balance turned out to be necessary and not sufficient, and the gap is instructive.
+It differentiates *what the palette and the shapes do* while leaving every threshold,
+time constant and warp direction global — so the whole pipeline was still tuned against one
+kind of music, and material built the other way round fell outside it. Two failures, on
+real tracks:
+
+- **A sustained lead over a held chord registered as nothing.** "Grandness" was energy
+  against a rolling baseline, and the baseline was a 180-frame ring buffer — one second at
+  the frame rate this actually runs at. Sustained music raises its own one-second baseline
+  as it swells, so a two-minute guitar solo sat at a ratio of ~1.0 for its entire length and
+  the visual treated the biggest passage in the song as ordinary playing.
+- **A dynamic-range-preserving master never cleared the absolute gate.** The second half of
+  the grandness test was `smoothstep(0.04, 0.12, rms)`, calibrated against a loud modern
+  master. An older mix with real headroom is quieter everywhere, so however grand the
+  passage, it failed the gate.
+
+Both are the same mistake: a constant that encodes an assumption about the material.
+
+The fix is two-part. **Normalize level against the track**, not against an absolute: a
+60-second loudness ceiling (fast attack, slow release) makes every level judgement
+master-independent. And **classify the material and blend between parameter sets**, from
+slow features — onset rate, crest factor, spectral occupancy — with time constants in the
+tens of seconds:
+
+| | pulse | drift | swarm |
+|---|---|---|---|
+| Material | transient-led | sustain-led | dense, loud |
+| Grandness path | hit vs. local context | sustained near the ceiling | both |
+| Envelope | 0.4 s / 2.5 s | 1.6 s / 6 s | 0.7 s / 3.5 s |
+| Warp | tunnels inward | blooms outward, turns | fast tunnel, counter-rotates |
+
+Weights sum to 1 and every downstream parameter is a linear blend, so this is a continuous
+field rather than a mode switch — no snapping, and a track between two archetypes gets a
+configuration between them.
+
+Note how this interacts with the safety contract: per-archetype limits are *tighter* than a
+global one could be. `drift` can hold grandness near the top for minutes, so its outward
+bloom is a sixth of `pulse`'s — a bloom sized for a two-second transient would empty the
+frame and keep it empty for the whole solo. A single global constant would have to be safe
+for the worst case and would therefore be timid in every other one.
+
 ## Render graph
 
 Ping-pong two `RGBA16Float` textures at native portrait resolution.

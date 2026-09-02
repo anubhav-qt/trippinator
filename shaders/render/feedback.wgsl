@@ -57,7 +57,7 @@ struct Uniforms {
     _pad1: u32,
     _pad2: u32,
 
-    zoom: f32,
+    warp_radial: f32,
     feedback_decay: f32,
     hue_shift: f32,
     grandness: f32,
@@ -66,6 +66,21 @@ struct Uniforms {
     exposure: f32,
     organic: f32,
     core_scale: f32,
+
+    warp_rotate: f32,
+    warp_spiral: f32,
+    warp_shear: f32,
+    warp_turb: f32,
+
+    level_norm: f32,
+    bg_ambient: f32,
+    bg_gate_lo: f32,
+    bg_gate_hi: f32,
+
+    profile_drift: f32,
+    profile_pulse: f32,
+    _pad3: f32,
+    _pad4: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -160,7 +175,24 @@ fn fold_pos(q: vec2<f32>, order: f32, frame: f32) -> vec2<f32> {
     return vec2<f32>(cos(a), sin(a)) * length(q);
 }
 
-// Kaleidoscope with the rigidity taken out of it:
+// Kaleidoscope with the rigidity taken out of it, and with the *kind* of motion coming
+// from the music rather than from constants in this file.
+//
+// Every rate below arrives as a uniform in units per SECOND and is multiplied by `u.dt`.
+// Two things follow from that, and both are the point:
+//
+//  - The motion is frame-rate independent. The six constants these replaced were applied
+//    per frame, so the whole image moved at a speed set by how fast the GPU happened to
+//    be running.
+//  - The character of the warp is a per-track variable rather than a fixed recipe. It
+//    used to be one motion — flow bend, one-signed swirl, always inward — so every track
+//    on every run got the same inward spiral and only the amplitude changed. Now the
+//    archetype sets the sign and balance of six independent components (see
+//    `ProfileParams` in crates/render/src/lib.rs), never-repeating slow phases wander
+//    them inside a bounded range, and the phases are entropy-seeded per run. Sustained
+//    music blooms outward, turns, and flows; transient music tunnels inward and spirals.
+//
+// The rest of the fold is unchanged:
 //  - the whole fold frame rotates slowly, so the wedge seams are never parked;
 //  - the mirror order breathes: two adjacent integer folds are crossfaded, so the count
 //    slides between orders continuously instead of only snapping on a keypress;
@@ -183,11 +215,11 @@ struct Warp {
 fn warp_coord(p: vec2<f32>) -> Warp {
     let org = u.organic;
 
-    // Normally a slow inward drift; on a genuinely grand moment this drops below 1.0
-    // and the whole image blooms outward. Driven by the audio's own baseline, never by
-    // a periodic function of time.
-    let grand_zoom = 1.0 - 0.045 * u.grandness;
-    let z = u.zoom * grand_zoom;
+    // Log-zoom rate. Positive tunnels inward, negative blooms outward, and which one a
+    // track gets is the archetype's decision. The grand-moment bloom and the transient
+    // kick are already folded in on the CPU, where they are clamped against the limit at
+    // which a sustained outward push would outrun injection and empty the frame.
+    let z = exp(u.warp_radial * u.dt);
 
     var q = p;
     let r0 = length(q);
@@ -203,13 +235,17 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // roughly a fifth of the frame wide sitting beside the core — which reads as the
     // centre not being centred. The ramp makes the origin a fixed point of the warp.
     q += flow(q * 1.7 + vec2<f32>(u.time * 0.035, u.time * -0.028))
-       * (0.011 * org * (0.6 + 0.8 * u.mid_w))
+       * (u.warp_turb * u.dt)
        * smoothstep(0.0, 0.35, r0);
 
+    // Uniform rotation. Zero for the transient-led archetype, which is why this did not
+    // exist before; sustained material gets a slow overall turn, and dense material turns
+    // the other way, so the two do not read as the same motion at different speeds.
+    q = rot(u.warp_rotate * u.dt) * q;
+
     // Differential rotation: outer radii turn faster than inner ones, which is what
-    // turns concentric trails into spiral arms.
-    let swirl = (0.010 + 0.020 * u.treble_w) * org * (0.5 + u.grandness);
-    q = rot(swirl * (0.25 + r0)) * q;
+    // turns concentric trails into spiral arms. Signed, so it can wind either way.
+    q = rot(u.warp_spiral * u.dt * (0.25 + r0)) * q;
 
     // Fold frame: slow rotation plus a wander, so seams travel instead of sitting.
     // Wrapped to TAU because it feeds a `%` against the wedge: left to accumulate for
@@ -257,8 +293,10 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     folded = mix(q, folded, smoothstep(0.0, 0.05, len));
 
     // Tumbling anisotropy in the zoom: the image breathes as a slowly turning ellipse
-    // instead of a perfect circle.
-    let ecc = 0.02 * org * sin(u.time * 0.026);
+    // instead of a perfect circle. `warp_shear` adds a steady stretch along the same
+    // turning axis on top of that wobble — a sustained pull in one direction, which is
+    // what makes the drift archetype's motion read as weather rather than as a spin.
+    let ecc = 0.02 * org * sin(u.time * 0.026) + u.warp_shear * u.dt;
     let aniso = vec2<f32>(1.0 + ecc, 1.0 - ecc);
     let axis = rot(u.time * 0.017 * org);
 
@@ -370,7 +408,15 @@ fn wave_rings(p: vec2<f32>, orb_radius: f32) -> vec3<f32> {
 
 fn layer_orb(p: vec2<f32>) -> vec3<f32> {
     let org = u.organic;
-    let radius = 0.10 + 0.30 * u.bass_w * (0.4 + u.rms * 2.0);
+    // Sized off the normalized level rather than raw RMS, so the orb reaches the same
+    // size on a quiet master as on a loud one.
+    //
+    // And sized by whichever voice this kind of music actually leads with, rather than by
+    // the bass unconditionally. Keying the centrepiece to a band that a sustained,
+    // guitar-led track barely occupies left the orb near its minimum radius for the whole
+    // song, which is the third of the three reasons that material came out looking thin.
+    let voice = mix(u.bass_w, u.mid_w, u.profile_drift);
+    let radius = 0.10 + 0.30 * voice * (0.4 + u.level_norm * 0.45);
 
     let r = length(p);
     let a = atan2(p.y, p.x);
@@ -512,7 +558,18 @@ fn layer_constellation(p: vec2<f32>) -> vec3<f32> {
 //
 // It runs in two tiers. An ambient tier is always on and tracks the track quietly, so an
 // ordinary passage still has a moving field around it rather than black. A grand tier is
-// multiplied by a `grandness` gate and is genuinely absent the rest of the time:
+// multiplied by a `grandness` gate and is genuinely absent the rest of the time.
+//
+// Both tiers are configured by the song archetype rather than by constants here, because
+// a single tuning could not serve both cases. Sustained, bass-light material — an
+// atmospheric lead over a held chord — used to get almost no background at all: the
+// ambient level keyed off absolute RMS, so a dynamic older master never cleared it, and
+// the two edge pools keyed off the bass and brilliance bands, which is exactly the part
+// of the spectrum that kind of music does not occupy. It now takes a much higher ambient
+// base, opens its grand tier at a lower gate, and reads its edge pools from the mid bands
+// where its energy actually is.
+//
+// The grand tier is:
 //  - curtains: large ridged folds of light, domain-warped so they drift like aurora;
 //  - a swell: a broad wave whose radius is pushed outward by the moment itself rather
 //    than by a timer, so it advances as the passage builds and falls back after;
@@ -553,13 +610,17 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     let vq = rot(u.time * 0.008) * (p * vec2<f32>(1.7, 0.85));
     let vn = fbm2(vq * 1.15 + flow(vq * 0.55 + drift) * (0.7 + 0.9 * org) + drift);
     let veil = pow(1.0 - abs(2.0 * vn - 1.0), 2.2);
-    acc += tint * veil * (0.035 + 0.22 * u.rms + 0.07 * u.mid_w);
+    acc += tint * veil * (u.bg_ambient + 0.30 * u.level_norm + 0.07 * u.mid_w);
 
     // Two broad pools anchored just off the top and bottom edges — the parts of a
     // portrait frame the mandala can never reach, whatever the core is set to. Split by
     // band so the two ends of the screen answer to different parts of the mix.
-    acc += warm * falloff(length(p - vec2<f32>(0.0, 1.00)), 0.85) * (0.02 + 0.14 * band(1u));
-    acc += cool * falloff(length(p - vec2<f32>(0.0, -1.00)), 0.85) * (0.02 + 0.14 * band(6u));
+    // Which bands drive them follows the archetype: bass and brilliance for percussive
+    // material, mid and high-mid for sustained material, where the lead lives.
+    let low_voice = mix(band(1u), band(3u), u.profile_drift);
+    let high_voice = mix(band(6u), band(4u), u.profile_drift);
+    acc += warm * falloff(length(p - vec2<f32>(0.0, 1.00)), 0.85) * (0.02 + 0.14 * low_voice);
+    acc += cool * falloff(length(p - vec2<f32>(0.0, -1.00)), 0.85) * (0.02 + 0.14 * high_voice);
 
     // -----------------------------------------------------------------------
     // Grand tier — the part that only shows up on a real moment. Multiplied by the
@@ -567,7 +628,7 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     // Calibrated against logged `grandness` on real tracks, where it spends most of its
     // time at 0.00-0.10 and peaks around 0.25-0.30 — not against the nominal 0..1.
     // -----------------------------------------------------------------------
-    let gate = smoothstep(0.04, 0.18, u.grandness);
+    let gate = smoothstep(u.bg_gate_lo, u.bg_gate_hi, u.grandness);
     if (gate > 0.0) {
         var grand = vec3<f32>(0.0);
 
@@ -598,7 +659,9 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
 
         // Filaments. Gated hard on top of the main gate, so these appear only at the peak
         // of a big moment — the thing you see two or three times a track.
-        let peak = smoothstep(0.20, 0.34, u.grandness);
+        // Placed relative to the archetype's own gate rather than at fixed thresholds,
+        // so "the top of a big moment" means the same thing whatever opens the gate.
+        let peak = smoothstep(u.bg_gate_hi * 1.15, u.bg_gate_hi * 1.90, u.grandness);
         if (peak > 0.0) {
             let fq = rot(-u.time * 0.013) * (p * vec2<f32>(1.4, 0.9));
             let fn_ = fbm2(fq * 2.6 + flow(fq * 1.1 - drift) * 1.4);
@@ -610,7 +673,9 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
         acc += grand * gate;
     }
 
-    return acc * outside * 0.55;
+    // Sustained material leans on the background much harder — it is where a swell that
+    // the mandala alone cannot express actually lands.
+    return acc * outside * (0.55 + 0.45 * u.profile_drift);
 }
 
 @fragment

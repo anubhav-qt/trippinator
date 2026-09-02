@@ -218,13 +218,22 @@ impl Engine {
         }
 
         let fps = self.frames_since_report as f32 / elapsed;
+        let p = self.renderer.profile();
+        // `lvl` and the profile weights are the two lines to read when a track does not
+        // look the way it should: `lvl` says whether the analysis thinks the music is
+        // loud for this track, and the weights say which configuration it chose.
         log::info!(
-            "{fps:.0} fps | rms {:.3} | bass {:.3} | mid {:.3} | treble {:.3} | grand {:.2} | organic {:.2} | core {:.2}",
+            "{fps:.0} fps | rms {:.3} | lvl {:.2} | bass {:.3} | mid {:.3} | treble {:.3}              | grand {:.2} | pulse {:.2} drift {:.2} swarm {:.2} | onsets {:.1}/s              | organic {:.2} | core {:.2}",
             self.audio.instant.rms,
+            self.audio.long_term.level_norm,
             self.audio.bands.energy[1],
             self.audio.bands.energy[3],
             self.audio.bands.energy[5],
             self.renderer.grandness(),
+            p.pulse,
+            p.drift,
+            p.swarm,
+            self.audio.character.onset_rate,
             self.renderer.organic(),
             self.renderer.core_scale(),
         );

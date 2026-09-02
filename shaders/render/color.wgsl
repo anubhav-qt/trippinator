@@ -25,7 +25,7 @@ struct Uniforms {
     _pad1: u32,
     _pad2: u32,
 
-    zoom: f32,
+    warp_radial: f32,
     feedback_decay: f32,
     hue_shift: f32,
     grandness: f32,
@@ -34,6 +34,21 @@ struct Uniforms {
     exposure: f32,
     organic: f32,
     core_scale: f32,
+
+    warp_rotate: f32,
+    warp_spiral: f32,
+    warp_shear: f32,
+    warp_turb: f32,
+
+    level_norm: f32,
+    bg_ambient: f32,
+    bg_gate_lo: f32,
+    bg_gate_hi: f32,
+
+    profile_drift: f32,
+    profile_pulse: f32,
+    _pad3: f32,
+    _pad4: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;

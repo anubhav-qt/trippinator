@@ -7,6 +7,7 @@ pub struct AudioFeatures {
     pub short_term: ShortTermFeatures,
     pub long_term: LongTermFeatures,
     pub bands: BandFeatures,
+    pub character: SongCharacter,
 }
 
 /// Per-band features:
@@ -61,17 +62,64 @@ pub struct ShortTermFeatures {
     pub spectral_movement: f32,
     /// Transient strength.
     pub transient_strength: f32,
+    /// True on the frame an onset is detected (adaptive-threshold spectral flux).
+    pub onset: bool,
 }
 
 /// Long-term features — sustained state.
+///
+/// Everything here is a time-based exponential envelope, not an N-frame ring buffer.
+/// The distinction is not cosmetic: the ring buffer this replaced was 180 frames long,
+/// which is 1.0 s at the 178 fps this actually runs at — so the "long-term" baseline was
+/// a one-second average, and any passage that stayed loud for more than a second was
+/// absorbed into its own baseline and stopped registering as anything at all.
 #[derive(Debug, Clone, Default)]
 pub struct LongTermFeatures {
-    /// Rolling average energy.
+    /// Rolling average energy, ~1.5 s. The local context.
     pub avg_energy: f32,
+    /// Slow average energy, ~25 s. The level this section of the track sits at.
+    pub slow_energy: f32,
+    /// Peak-following loudness reference, ~0.4 s up and ~60 s down: how loud this track
+    /// gets at its loudest. Dividing by it makes every level judgement independent of how
+    /// the record was mastered, which is what lets a quiet 1979 mix and a brickwalled
+    /// modern one both reach the top of the visual range.
+    pub loudness_ref: f32,
+    /// Current level as a fraction of `loudness_ref` (0..1). The master-independent
+    /// "how loud is it right now, for this track" reading.
+    pub level_norm: f32,
+    /// How much headroom this track uses: high for a dynamic master, low for a
+    /// compressed one.
+    pub dynamic_range: f32,
     /// Dominant frequency profile center.
     pub dominant_frequency: f32,
-    /// Energy volatility (variance of energy over time).
+    /// Energy volatility (std-dev of energy over ~4 s, scaled).
     pub volatility: f32,
     /// How long current energy level has been stable in seconds.
     pub stability_duration: f32,
+}
+
+/// What *kind* of music this is, on timescales of tens of seconds.
+///
+/// These describe the material rather than the moment, and they are what the visual
+/// side switches configuration on. All are 0..1 and heavily smoothed — they should
+/// drift over a track, never move on a beat.
+#[derive(Debug, Clone, Default)]
+pub struct SongCharacter {
+    /// Detected onsets per second, smoothed. Raw units, not normalized — a busy rock
+    /// track sits around 4-8, an ambient pad near 0.
+    pub onset_rate: f32,
+    /// Transient-led: frequent onsets, sharp attacks. Drums and plucked strings.
+    pub percussive: f32,
+    /// Sustain-led: energy stays up between onsets. Bowed strings, organ, held guitar,
+    /// pads. This is the axis that "Comfortably Numb" scores high on and that nothing
+    /// in the visual pipeline was previously reading.
+    pub sustained: f32,
+    /// Slow spectral balance, each ~20 s. Where this track's weight sits.
+    pub bass_w: f32,
+    pub mid_w: f32,
+    pub treble_w: f32,
+    /// Slow spectral centroid — overall brightness of the material.
+    pub brightness: f32,
+    /// How full the spectrum is: a wall of sound vs. a few sparse voices.
+    pub density: f32,
 }

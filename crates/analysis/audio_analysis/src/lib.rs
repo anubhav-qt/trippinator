@@ -8,5 +8,7 @@
 mod dsp;
 mod features;
 
-pub use features::{AudioFeatures, BandFeatures, InstantFeatures, ShortTermFeatures, LongTermFeatures};
+pub use features::{
+    AudioFeatures, BandFeatures, InstantFeatures, LongTermFeatures, ShortTermFeatures, SongCharacter,
+};
 pub use dsp::DspEngine;
