@@ -394,10 +394,27 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // mandala can still tunnel inward while the field around it flows out.
     let drift_z = z * exp(-u.bg_outflow * u.dt);
 
-    return Warp(
-        axis * ((transpose(axis) * folded) * aniso) * z,
-        axis * ((transpose(axis) * q) * aniso) * drift_z,
-    );
+    var fold_out = axis * ((transpose(axis) * folded) * aniso) * z;
+    var drift_out = axis * ((transpose(axis) * q) * aniso) * drift_z;
+
+    // Inside the orb the warp is the IDENTITY. Not "mostly radial", not "symmetric" —
+    // the pixel samples exactly itself, so that region is its own injection decayed to
+    // equilibrium and nothing else. That makes it a clean radial dot by construction.
+    //
+    // Making the fold symmetric there was not enough on its own. A symmetric warp is
+    // still a warp: with the radial rate blooming outward, the centre drains faster than
+    // injection refills it, so the orb came out as a dark hole with a bright rim — which
+    // is what read as a glass bubble with a highlight on one side. Holding the coordinate
+    // still removes the drain rather than compensating for it.
+    //
+    // Consequence worth knowing: a ripple now emanates from the orb's edge rather than
+    // from the exact centre, because there is no motion inside the hold region to carry
+    // it.
+    let hold = 1.0 - smoothstep(fold_in * 0.55, fold_in * 1.45, r0);
+    fold_out = mix(fold_out, p, hold);
+    drift_out = mix(drift_out, p, hold);
+
+    return Warp(fold_out, drift_out);
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +440,12 @@ fn wave_rings(p: vec2<f32>, orb_radius: f32) -> vec3<f32> {
 
     // bass, mid, high-mid, brilliance — four distinct voices across the spectrum.
     var band_of_ring = array<u32, 4>(1u, 3u, 4u, 6u);
-    let gap = 0.16;
+    // Was 0.16, which left a dark moat between the orb and the first ring. Against a
+    // bright field that moat reads as a shell around the orb — the orb appearing to sit
+    // inside a bubble rather than being the centre of the thing. The rings now start
+    // essentially at the orb's edge; the small remaining gap is enough that the orb keeps
+    // its own clean outline and does not inherit the rings' angular lobes.
+    let gap = 0.03;
 
     for (var i = 0u; i < 4u; i = i + 1u) {
         let fi = f32(i);
@@ -707,7 +729,13 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
     let vq = rot(u.time * 0.008) * (p * oriented(0.85, 1.7));
     let vn = fbm2(vq * 1.15 + flow(vq * 0.55 + drift) * (0.7 + 0.9 * org) + drift);
     let veil = pow(1.0 - abs(2.0 * vn - 1.0), 2.2);
-    acc += tint * veil * (u.bg_ambient + 0.30 * u.level_norm + 0.07 * u.mid_w);
+    // NOTE ON THE COEFFICIENT: this term used to be `0.22 * u.rms`, and `rms` runs at
+    // about 0.09 on typical material while `level_norm` runs at about 0.9. Swapping the
+    // one for the other without rescaling multiplied this whole term by ten and made the
+    // background roughly five times brighter than it had ever been tuned to be — which is
+    // what filled the frame with a dominant wash of colour. The coefficient has to shrink
+    // by the same factor the quantity grew by.
+    acc += tint * veil * (u.bg_ambient + 0.04 * u.level_norm + 0.07 * u.mid_w);
 
     // Two broad pools anchored just off the two ends of the long axis — the parts of the
     // frame the mandala can never reach, whatever the core is set to. Split by band so the
@@ -771,9 +799,11 @@ fn layer_background(p: vec2<f32>) -> vec3<f32> {
         acc += grand * gate;
     }
 
-    // Sustained material leans on the background much harder — it is where a swell that
-    // the mandala alone cannot express actually lands.
-    return acc * outside * (0.55 + 0.45 * u.profile_drift);
+    // Sustained material leans on the background harder — it is where a swell the
+    // mandala alone cannot express actually lands. Kept to a moderate lift: at 0.45 this
+    // compounded with the ambient term above and the background stopped being the room
+    // the mandala sits in and became the subject.
+    return acc * outside * (0.55 + 0.25 * u.profile_drift);
 }
 
 // Sample the previous frame with the three channels warped by very slightly different
@@ -842,13 +872,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // the retention to a power shortens the half-life by that factor and stays frame-rate
     // independent, so the background reads as something passing through rather than as
     // paint building up.
-    // The extra decay out here was originally 2.5, chosen when the background had no
-    // outward motion of its own and its only alternative to accumulating into a flat wash
-    // was to be cleared quickly. Now that it flows out, it can be allowed to travel much
-    // further before it goes — the outflow is what stops the wash, so the trail no longer
-    // has to.
+    // Originally 2.5, chosen when the background had no outward motion of its own and
+    // being cleared quickly was its only defence against accumulating into a flat wash.
+    // The outflow now does part of that job, so this can be lower — but 1.15 was too far:
+    // the outflow moves light outward, it does not remove it, and the light piled up at
+    // the far end instead. This keeps most of the extra travel without the wash.
     let outer = smoothstep(u.core_radius * 0.85, u.core_radius * 1.30, length(p));
-    let decay = pow(u.feedback_decay, 1.0 + 1.15 * outer);
+    let decay = pow(u.feedback_decay, 1.0 + 1.80 * outer);
 
     // Blend the two feedback samples by radius. Doing this in colour rather than in
     // coordinates is what keeps the kaleidoscope inside the core without a seam: the fold

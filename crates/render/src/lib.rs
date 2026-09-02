@@ -397,7 +397,7 @@ impl ProfileParams {
         grand_release: 6.0,
         trail_mul: 2.1,
         inject_mul: 1.15,
-        bg_ambient: 0.115,
+        bg_ambient: 0.090,
         bg_gate_lo: 0.02,
         bg_gate_hi: 0.11,
         // Negative: a slow outward bloom rather than a tunnel inward. Sized so light
@@ -727,7 +727,10 @@ impl Renderer {
             // Tuned to be visible as fringing on moving edges without reading as a
             // misconverged projector. The feedback loop multiplies this by the trail
             // depth, so it wants to be far smaller than it looks like it should.
-            chroma: 0.0011,
+            // Backed off after the first look: the loop compounds this over the whole
+            // trail, and at 0.0011 the fringing was strong enough to read as glass rather
+            // than as iridescence. Raise it on `p` if it wants more.
+            chroma: 0.0005,
             grandness_env: 0.0,
             // Tuned by ear against real music with all four layers running. Notably
             // ~2x higher than the value predicted from equilibrium alone: the layers
