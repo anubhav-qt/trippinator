@@ -371,8 +371,15 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // Inside the orb the warp is now only zoom and rotation about the centre, both of
     // which are radially symmetric, so a radially symmetric injection stays radially
     // symmetric however long it accumulates.
+    // The fold begins at 2.0x the orb radius, which is exactly where the hold region
+    // below ends. The two must NOT overlap, and that is the whole point of these numbers:
+    // `fold_pos` aims every sample into a single angular wedge, so a *partially* applied
+    // fold is a coordinate pulled toward one direction by an amount that varies with
+    // radius. Across the orb's rim that is a brightness gradient down one side — a
+    // crescent, and a lit-sphere look that no amount of making the orb itself symmetric
+    // can remove, because the asymmetry is in the sampling and not in the injection.
     let fold_in = max(u.orb_radius, 1e-3);
-    folded = mix(q, folded, smoothstep(fold_in * 0.95, fold_in * 2.20, len));
+    folded = mix(q, folded, smoothstep(fold_in * 2.00, fold_in * 3.20, len));
 
     // Tumbling anisotropy in the zoom: the image breathes as a slowly turning ellipse
     // instead of a perfect circle. `warp_shear` adds a steady stretch along the same
@@ -410,115 +417,30 @@ fn warp_coord(p: vec2<f32>) -> Warp {
     // Consequence worth knowing: a ripple now emanates from the orb's edge rather than
     // from the exact centre, because there is no motion inside the hold region to carry
     // it.
-    let hold = 1.0 - smoothstep(fold_in * 0.55, fold_in * 1.45, r0);
+    // Fully identity out past the orb's rim, reaching zero exactly where the fold starts.
+    // Between the two the warp is only zoom and rotation about the centre, both radially
+    // symmetric, so there is no radius at which anything directional touches the orb.
+    let hold = 1.0 - smoothstep(fold_in * 1.25, fold_in * 2.00, r0);
     fold_out = mix(fold_out, p, hold);
     drift_out = mix(drift_out, p, hold);
 
     return Warp(fold_out, drift_out);
 }
-
-// ---------------------------------------------------------------------------
-// Injection layers. Each returns an energy-per-second rate; they are summed.
-// ---------------------------------------------------------------------------
-
-// Four concentric wave rings sitting outside the central orb, separated from it by a
-// gap. Each ring is a closed wave function r(theta) = base + amp*sin(lobes*theta + phase),
-// bound to a different band so they articulate independently — different lobe count,
-// different drift rate, different tint. They never move in lockstep, which is what stops
-// them reading as four copies of one animation.
+// The four concentric "wave rings" that used to live here are gone deliberately.
 //
-// On top of that each ring has its own life: it spins at its own rate and direction
-// (faster when its band is loud), its shape *function* morphs — the lobe count drifts
-// fractionally, a second harmonic fades in and out, and a cusped term crossfades against
-// the smooth sine so the outline travels between star-like and wave-like — it hangs
-// slightly off-center on its own small orbit, and its stroke density varies around the
-// circumference so it can thin to almost nothing on one side. They still translate and
-// scale with the orb, because every radius here is still relative to the orb's own.
-fn wave_rings(p: vec2<f32>, orb_radius: f32) -> vec3<f32> {
-    let org = u.organic;
-    var acc = vec3<f32>(0.0);
+// They were drawn relative to the orb, at its radius plus a gap, which made them a set
+// of shells hugging it — and a shell around a bright centre reads as a bubble with the
+// orb suspended inside it, which is not what the middle of this is meant to be. Closing
+// the gap so they sat directly on the orb made it worse rather than better: the rings
+// are angularly lobed, so at the orb's rim they shaded one side of it and turned a flat
+// dot into a lit sphere.
+//
+// If something is wanted between the orb and the spectral ring, it must not be
+// concentric with the orb and must not carry an angular term near its rim. Recover the
+// old implementation from git history rather than rewriting it from this description.
 
-    // bass, mid, high-mid, brilliance — four distinct voices across the spectrum.
-    var band_of_ring = array<u32, 4>(1u, 3u, 4u, 6u);
-    // Was 0.16, which left a dark moat between the orb and the first ring. Against a
-    // bright field that moat reads as a shell around the orb — the orb appearing to sit
-    // inside a bubble rather than being the centre of the thing. The rings now start
-    // essentially at the orb's edge; the small remaining gap is enough that the orb keeps
-    // its own clean outline and does not inherit the rings' angular lobes.
-    let gap = 0.03;
-
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        let fi = f32(i);
-        let e = band(band_of_ring[i]);
-
-        // Alternating spin direction; a loud band spins its own ring faster.
-        let dir = select(-1.0, 1.0, (i % 2u) == 0u);
-        let spin = dir * (0.10 + 0.09 * fi + 0.55 * e) * org;
-
-        // Each ring hangs on its own small orbit around the orb center. Small enough
-        // that the set still reads as concentric, large enough to break the "all drawn
-        // with one compass" look.
-        let wob_a = u.time * (0.11 + 0.05 * fi) * org + fi * 2.4;
-        let center = vec2<f32>(cos(wob_a), sin(wob_a * 1.3))
-                   * (0.012 + 0.020 * fi) * org * (0.5 + e);
-        let d = p - center;
-
-        let r = length(d);
-        let a = atan2(d.y, d.x) + u.time * spin;
-
-        let base_r = orb_radius + gap + 0.17 * fi;
-
-        // Starts at 5, not 3: a 3-lobe ring is literally a rounded triangle, and on
-        // loud bass its amplitude pushes it far enough out to read as a stray outline
-        // rather than as ring texture. Low-order lobes look like shapes; higher ones
-        // look like surface.
-        //
-        // The lobe count drifts, but a fractional harmonic is not periodic in the angle,
-        // so it would tear the ring at the branch cut (invariant 3). Crossfading the two
-        // integer harmonics either side of the drift gives the same "count is changing"
-        // read, with the amplitude beat between them as a bonus, and stays closed.
-        let lobes_f = 5.0 + fi * 2.0 + 0.9 * org * sin(u.time * 0.047 + fi);
-        let l0 = floor(lobes_f);
-        let lb = smoothstep(0.0, 1.0, fract(lobes_f));
-        let lobes2 = l0 * 2.0 + 1.0;
-        let phase = u.time * (0.13 + 0.07 * fi) + fi * 1.7;
-
-        // Shape morph: smooth sine <-> cusped triangle wave, plus a second harmonic that
-        // comes and goes. This is the ring changing its own function, not just its phase.
-        let smooth_w = mix(sin(a * l0 + phase), sin(a * (l0 + 1.0) + phase), lb);
-        let cusp_w = mix(
-            1.0 - 4.0 * abs(fract(a * l0 / TAU + phase * 0.16) - 0.5),
-            1.0 - 4.0 * abs(fract(a * (l0 + 1.0) / TAU + phase * 0.16) - 0.5),
-            lb
-        );
-        let morph = 0.5 + 0.5 * sin(u.time * 0.061 + fi * 1.9);
-        let harm = (0.5 + 0.5 * sin(u.time * 0.083 + fi * 0.7)) * 0.45 * org;
-
-        var shape = mix(smooth_w, cusp_w, clamp(morph * org, 0.0, 1.0));
-        shape += sin(a * lobes2 - phase * 1.4) * harm;
-
-        // Slow elliptical squash of the ring itself, on its own turning axis.
-        let sq = 1.0 + 0.06 * org * sin(a * 2.0 - u.time * (0.05 + 0.02 * fi) * org);
-
-        let ring_r = base_r * sq + shape * (0.015 + 0.055 * e);
-
-        // Stroke density varies around the circumference, so the ring breathes in and
-        // out of existence along its length instead of being a uniform hoop. Centered
-        // near 1.0 so this does not quietly dim the layer.
-        let dens = mix(
-            1.0,
-            0.55 + 0.9 * ang_noise(a, 1.6, u.time * 0.09 + fi * 3.0),
-            org * 0.8
-        );
-
-        let tint = mix(vec3<f32>(1.0, 0.5, 0.2), vec3<f32>(0.35, 0.75, 1.0), fi / 3.0);
-        acc += tint * falloff(abs(r - ring_r), 0.012 + 0.010 * e) * (0.12 + e * 1.1) * dens;
-    }
-    return acc;
-}
 
 fn layer_orb(p: vec2<f32>) -> vec3<f32> {
-    let org = u.organic;
     // Sized off the normalized level rather than raw RMS, so the orb reaches the same
     // size on a quiet master as on a loud one.
     //
@@ -532,21 +454,23 @@ fn layer_orb(p: vec2<f32>) -> vec3<f32> {
     let radius = u.orb_radius / max(u.core_radius, 1e-4);
 
     let r = length(p);
-    let a = atan2(p.y, p.x);
-    let wob = sin(a * 3.0 - u.time * 0.23) * 0.055
-            + sin(a * 5.0 + u.time * 0.17) * 0.035
-            + (ang_noise(a, 1.1, u.time * 0.12) - 0.5) * 0.12;
-    // Faded out with size: a lobed outline on an orb only a few pixels across is not a
-    // shape, it is an off-centre-looking blob.
-    let r_eff = radius * (1.0 + wob * org * (0.5 + u.attack)
-                                * smoothstep(0.09, 0.20, radius));
+
+    // THE ORB IS AN EXPLICIT EXCEPTION TO THE `organic` PREFERENCE. Everywhere else in
+    // this file, elements are deliberately given lobed outlines, independent rotation and
+    // shape morphing so nothing reads as machined. The orb is not: it is asked to be a
+    // flat, perfectly radial dot, brightest at the exact centre and dimming monotonically
+    // to its boundary, and it is the one element where that is the requirement.
+    //
+    // The lobed outline that used to be here — three angular terms modulating `r_eff` —
+    // is why. An angular radius makes `t` below a function of angle, so the body is
+    // brighter on one side, and at the sizes the orb actually runs at that does not read
+    // as an organic outline. It reads as a shaded sphere. Do not put it back.
+    let r_eff = radius;
 
     // One tint across the whole body, and a brightness that is a function of RADIUS AND
-    // NOTHING ELSE. There is no angular term anywhere below — not in the brightness, not
-    // in the hue, not in the channel weighting — so every pixel at the same distance from
-    // the centre is identical by construction. That is the whole requirement: a flat 2D
-    // dot, brightest at the exact centre, dimming monotonically to its boundary, rather
-    // than a sphere with a lit side.
+    // NOTHING ELSE — no angular term in the radius, the brightness, the hue or the channel
+    // weighting — so every pixel at the same distance from the centre is identical by
+    // construction rather than by tuning.
     //
     // Two earlier attempts at "interest" inside the orb are gone for the same reason, and
     // must not come back: interior churn and per-channel limb dispersion both put
@@ -568,7 +492,7 @@ fn layer_orb(p: vec2<f32>) -> vec3<f32> {
 
     let orb = (tint * profile + vec3<f32>(1.00, 0.94, 0.88) * core * 0.90)
             * (0.55 + u.attack * 0.8);
-    return orb + wave_rings(p, radius);
+    return orb;
 }
 
 // Seven arcs around a ring, one per band. This is the layer the kaleidoscope turns into
